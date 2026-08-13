@@ -1,0 +1,35 @@
+# Subtitler Pro — Python dependencies
+#
+#   pip install -r requirements.txt
+#
+# Desktop shell (required)
+pywebview>=4.4
+
+# --- AI transcription (optional, but needed for the Transcribe button) ------
+#
+# faster-whisper is the default engine: a CTranslate2 reimplementation of
+# Whisper that is several times quicker than the reference model on CPU, uses
+# far less memory, and reports the word-level timestamps this app uses to cut
+# captions accurately. Models are pulled from the Hugging Face Hub on first use
+# and cached under ~/.cache/huggingface, after which everything runs offline.
+faster-whisper>=1.0.0
+
+# Lets the app list which Whisper models are already cached locally.
+huggingface-hub>=0.23.0
+
+# --- Optional fallback engine ----------------------------------------------
+#
+# Install these as well if you want to run an arbitrary Whisper-architecture
+# checkpoint from the Hub (community fine-tunes, non-CTranslate2 conversions).
+# They are a large download, so they are commented out by default.
+#
+# transformers>=4.40.0
+# torch>=2.2.0
+#
+# --- Note on ProRes export --------------------------------------------------
+#
+# The alpha ProRes export shells out to ffmpeg, which is a system binary rather
+# than a Python package. Install it separately:
+#   macOS          brew install ffmpeg
+#   Debian/Ubuntu  sudo apt install ffmpeg
+#   Windows        https://www.gyan.dev/ffmpeg/builds/

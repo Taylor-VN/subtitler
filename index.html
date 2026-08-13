@@ -35,6 +35,11 @@
         </button>
         <input type="file" id="subFileInput" accept=".srt,.vtt,.json" style="display:none">
 
+        <button id="btnTranscribe" class="btn btn-ai" title="Auto-transcribe with a local Whisper model (T)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+          Transcribe
+        </button>
+
         <button id="btnTriggerImportPreset" class="btn btn-accent" title="Import Premiere Preset (.prfpset / .prtextstyle)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
           Import Preset (.prfpset)
@@ -420,6 +425,7 @@
         <div class="shortcut-row"><kbd>M</kbd> <span>Toggle Audio Mute</span></div>
         <div class="shortcut-row"><kbd>G</kbd> <span>Toggle Title / Action Safe Guides</span></div>
         <div class="shortcut-row"><kbd>E</kbd> <span>Open ProRes 4444 + Alpha Export</span></div>
+        <div class="shortcut-row"><kbd>T</kbd> <span>Auto-Transcribe with a Local Whisper Model</span></div>
         <div class="shortcut-row"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <span>Aspect Ratio: 16:9 / 1:1 / 4:5 / 9:16</span></div>
         <div class="shortcut-row"><kbd>+</kbd> / <kbd>-</kbd> <span>Zoom Timeline In / Out</span></div>
       </div>
@@ -485,10 +491,123 @@
     </div>
   </div>
 
+  <!-- AI Transcription Modal -->
+  <div id="transcribeModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Auto-Transcribe — Local Whisper Model</h3>
+        <button id="btnCloseTranscribeModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-hint">
+          Runs an open-source Whisper model on this machine. The audio never
+          leaves your computer. Models are downloaded from Hugging Face the
+          first time you use them, then cached for offline runs.
+        </p>
+
+        <div class="export-row">
+          <span class="export-lbl">Media</span>
+          <span id="transcribeMediaInfo" class="export-val">No media loaded</span>
+        </div>
+
+        <div class="export-row">
+          <label class="export-lbl" for="transcribeModelSelect">Model</label>
+          <select id="transcribeModelSelect" class="input-select">
+            <option value="tiny">Tiny — fastest, ~75 MB</option>
+            <option value="base">Base — fast, ~145 MB</option>
+            <option value="small" selected>Small — balanced, ~480 MB</option>
+            <option value="medium">Medium — accurate, ~1.5 GB</option>
+            <option value="large-v3">Large v3 — best quality, ~3 GB</option>
+            <option value="distil-large-v3">Distil Large v3 — near-large, ~2× faster</option>
+            <option value="__custom__">Custom Hugging Face model / local folder…</option>
+          </select>
+        </div>
+
+        <div class="export-row hidden" id="customModelRow">
+          <label class="export-lbl" for="transcribeCustomModel">Model ID</label>
+          <input type="text" id="transcribeCustomModel" class="input-text"
+                 placeholder="e.g. Systran/faster-whisper-large-v3  or  /path/to/local/model">
+        </div>
+
+        <div class="export-row">
+          <label class="export-lbl" for="transcribeLanguage">Language</label>
+          <select id="transcribeLanguage" class="input-select">
+            <option value="auto" selected>Detect automatically</option>
+            <option value="en">English</option>
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="it">Italian</option>
+            <option value="pt">Portuguese</option>
+            <option value="nl">Dutch</option>
+            <option value="pl">Polish</option>
+            <option value="ru">Russian</option>
+            <option value="tr">Turkish</option>
+            <option value="ar">Arabic</option>
+            <option value="hi">Hindi</option>
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese</option>
+            <option value="vi">Vietnamese</option>
+          </select>
+        </div>
+
+        <div class="export-row">
+          <label class="export-lbl" for="transcribeTask">Task</label>
+          <select id="transcribeTask" class="input-select">
+            <option value="transcribe" selected>Transcribe (keep original language)</option>
+            <option value="translate">Translate to English</option>
+          </select>
+        </div>
+
+        <div class="style-group compact-group">
+          <label class="group-label">Caption Segmentation</label>
+          <div class="export-row">
+            <label class="export-lbl" for="segMaxChars">Chars / line</label>
+            <input type="range" id="segMaxChars" min="20" max="60" value="42" class="input-range">
+            <span id="segMaxCharsVal" class="range-val">42</span>
+          </div>
+          <div class="export-row">
+            <label class="export-lbl" for="segMaxLines">Max lines</label>
+            <select id="segMaxLines" class="input-select">
+              <option value="1">1 line</option>
+              <option value="2" selected>2 lines</option>
+              <option value="3">3 lines</option>
+            </select>
+          </div>
+          <div class="export-row">
+            <label class="export-lbl" for="segMaxDur">Max duration</label>
+            <input type="range" id="segMaxDur" min="2" max="10" step="0.5" value="6" class="input-range">
+            <span id="segMaxDurVal" class="range-val">6.0s</span>
+          </div>
+          <label class="checkbox-label">
+            <input type="checkbox" id="transcribeVad" checked> Skip silent passages (VAD)
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="transcribeReplace" checked> Replace existing captions
+          </label>
+        </div>
+
+        <div id="transcribeBackendNote" class="export-note"></div>
+
+        <div id="transcribeProgressWrap" class="export-progress hidden">
+          <div class="progress-track"><div id="transcribeProgressBar" class="progress-fill"></div></div>
+          <div id="transcribeProgressText" class="progress-text">Preparing…</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btnCancelTranscribe" class="btn btn-outline">Cancel</button>
+        <button id="btnStartTranscribe" class="btn btn-ai">Transcribe</button>
+      </div>
+    </div>
+  </div>
+
   <script src="js/presetParser.js"></script>
   <script src="js/subtitleManager.js"></script>
   <script src="js/videoPlayer.js"></script>
   <script src="js/exporter.js"></script>
+  <script src="js/captionSegmenter.js"></script>
+  <script src="js/transcription.js"></script>
   <script src="js/timeline.js"></script>
   <script src="js/app.js"></script>
 </body>

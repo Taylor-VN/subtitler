@@ -1240,3 +1240,49 @@ kbd {
 .caption-item.playing {
   box-shadow: inset 3px 0 0 var(--accent-cyan);
 }
+
+/* ============================================================
+   AI transcription
+   ============================================================ */
+
+.btn-ai {
+  background: linear-gradient(180deg, #0f8a6a 0%, #0a6e54 100%);
+  border: 1px solid #16a883;
+  color: #fff;
+  font-weight: 600;
+}
+.btn-ai:hover {
+  background: linear-gradient(180deg, #14a07b 0%, #0c8163 100%);
+}
+.btn-ai:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+#transcribeModal .modal-card { width: 560px; }
+#transcribeModal .modal-body { max-height: 68vh; overflow-y: auto; }
+
+.compact-group {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+.compact-group .export-row { margin-bottom: 8px; }
+.compact-group .checkbox-label { margin-right: 14px; }
+
+.input-text {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-main);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 6px 8px;
+}
+.input-text:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.export-row.hidden { display: none; }

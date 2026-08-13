@@ -30,6 +30,12 @@ document.addEventListener('DOMContentLoaded', () => {
   );
 
   const exporter = new AlphaExporter(playerController, subManager, FPS);
+  const transcriber = new TranscriptionController();
+  const segmenter = new CaptionSegmenter({ fps: FPS });
+
+  // Holds the last transcription so segmentation settings can be re-applied
+  // without paying for another model run.
+  let lastTranscription = null;
 
   // Exposed for debugging and for the automated UI tests.
   window.__player = playerController;
@@ -37,6 +43,9 @@ document.addEventListener('DOMContentLoaded', () => {
   window.__timeline = timelineController;
   window.__exporter = exporter;
   window.__presets = presetParser;
+  window.__transcriber = transcriber;
+  window.__segmenter = segmenter;
+  window.__applyTranscription = applyTranscription;
 
   // --- Toast notifications (non-blocking replacement for alert()) ---
   const toastStack = document.createElement('div');
@@ -60,6 +69,7 @@ document.addEventListener('DOMContentLoaded', () => {
   bindStyleInspectorUI();
   bindTimelineToolbar();
   bindExportModal();
+  bindTranscribeModal();
   bindKeyboardShortcuts();
 
   applyPresetToUI(playerController.activePreset);
@@ -292,6 +302,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('mediaInfoLabel').textContent = file.name;
     document.getElementById('programFrame').classList.add('has-media');
     timelineController.loadAudioWaveform(file);
+    transcriber.setFile(file);
+    lastTranscription = null; // belongs to the previous media
     toast(`Loaded "${file.name}".`, 'success');
   }
 
@@ -852,6 +864,195 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // --- AI Transcription ---
+  /** Re-segments the stored transcription and pushes it into the caption list. */
+  function applyTranscription(result, opts = {}) {
+    if (!result) return 0;
+    // Remember it so the segmentation controls can re-cut the same
+    // transcription without paying for another model run.
+    lastTranscription = result;
+    segmenter.updateSettings({
+      maxCharsPerLine: opts.maxCharsPerLine,
+      maxLines: opts.maxLines,
+      maxDurationSec: opts.maxDurationSec,
+      fps: FPS
+    });
+
+    const words = transcriber.collectWords(result);
+    const captions = words.length
+      ? segmenter.segment(words)
+      : segmenter.segmentFromSegments(result.segments);
+
+    if (captions.length === 0) return 0;
+
+    if (opts.replace === false) {
+      const existing = subManager.getSubtitles().map(s => ({ start: s.start, end: s.end, text: s.text }));
+      subManager.setSubtitles([...existing, ...captions]);
+    } else {
+      subManager.setSubtitles(captions);
+    }
+
+    timelineController.resizeAndDraw();
+    return captions.length;
+  }
+
+  function bindTranscribeModal() {
+    const modal = document.getElementById('transcribeModal');
+    const modelSelect = document.getElementById('transcribeModelSelect');
+    const customRow = document.getElementById('customModelRow');
+    const customInput = document.getElementById('transcribeCustomModel');
+    const startBtn = document.getElementById('btnStartTranscribe');
+    const cancelBtn = document.getElementById('btnCancelTranscribe');
+    const note = document.getElementById('transcribeBackendNote');
+    const progressWrap = document.getElementById('transcribeProgressWrap');
+    const progressBar = document.getElementById('transcribeProgressBar');
+    const progressText = document.getElementById('transcribeProgressText');
+    const mediaInfo = document.getElementById('transcribeMediaInfo');
+
+    const segChars = document.getElementById('segMaxChars');
+    const segLines = document.getElementById('segMaxLines');
+    const segDur = document.getElementById('segMaxDur');
+    let running = false;
+
+    segChars.addEventListener('input', () => {
+      document.getElementById('segMaxCharsVal').textContent = segChars.value;
+      reSegmentIfPossible();
+    });
+    segDur.addEventListener('input', () => {
+      document.getElementById('segMaxDurVal').textContent = `${parseFloat(segDur.value).toFixed(1)}s`;
+      reSegmentIfPossible();
+    });
+    segLines.addEventListener('change', reSegmentIfPossible);
+
+    /** Live re-cut of an existing transcription — no model run required. */
+    function reSegmentIfPossible() {
+      if (running || !lastTranscription) return;
+      const n = applyTranscription(lastTranscription, readSegmentSettings());
+      if (n) progressText.textContent = `Re-segmented into ${n} captions.`;
+    }
+
+    function readSegmentSettings() {
+      return {
+        maxCharsPerLine: parseInt(segChars.value, 10),
+        maxLines: parseInt(segLines.value, 10),
+        maxDurationSec: parseFloat(segDur.value),
+        replace: document.getElementById('transcribeReplace').checked
+      };
+    }
+
+    modelSelect.addEventListener('change', () => {
+      customRow.classList.toggle('hidden', modelSelect.value !== '__custom__');
+    });
+
+    async function updateBackendNote() {
+      const probe = await transcriber.probe();
+
+      if (!transcriber.hasBackend()) {
+        note.className = 'export-note warn';
+        note.textContent =
+          'AI transcription needs the desktop backend. Launch with run_subtitler.sh '
+          + '(or "python3 app.py") instead of opening index.html directly in a browser.';
+        startBtn.disabled = true;
+        return;
+      }
+      if (!probe.available) {
+        note.className = 'export-note err';
+        note.textContent =
+          'No transcription engine is installed. Run "pip install -r requirements.txt" '
+          + 'in the Subtitler Pro folder, then relaunch.';
+        startBtn.disabled = true;
+        return;
+      }
+
+      note.className = 'export-note';
+      const cached = (probe.cached_models || []).length;
+      note.textContent =
+        `Ready — ${probe.engines.join(' + ')} on ${probe.device_name}. `
+        + (cached
+            ? `${cached} Whisper model${cached === 1 ? '' : 's'} already cached locally.`
+            : 'The chosen model will be downloaded from Hugging Face on first use.');
+      startBtn.disabled = !transcriber.currentFile;
+    }
+
+    function openModal() {
+      const file = transcriber.currentFile;
+      mediaInfo.textContent = file ? file.name : 'No media loaded — load a video or audio file first';
+      progressWrap.classList.add('hidden');
+      progressBar.style.width = '0%';
+      modal.classList.remove('hidden');
+      updateBackendNote();
+    }
+
+    function closeModal() {
+      if (running) {
+        transcriber.cancel();
+        running = false;
+      }
+      modal.classList.add('hidden');
+    }
+
+    document.getElementById('btnTranscribe').addEventListener('click', openModal);
+    document.getElementById('btnCloseTranscribeModal').addEventListener('click', closeModal);
+    cancelBtn.addEventListener('click', closeModal);
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+
+    startBtn.addEventListener('click', async () => {
+      if (running) return;
+      if (!transcriber.currentFile) {
+        toast('Load a video or audio file before transcribing.', 'warn');
+        return;
+      }
+
+      running = true;
+      startBtn.disabled = true;
+      playerController.pause();
+      progressWrap.classList.remove('hidden');
+      progressBar.style.width = '0%';
+      progressText.textContent = 'Preparing…';
+
+      try {
+        const result = await transcriber.transcribe({
+          model: modelSelect.value === '__custom__' ? 'small' : modelSelect.value,
+          customModel: modelSelect.value === '__custom__' ? customInput.value.trim() : '',
+          language: document.getElementById('transcribeLanguage').value,
+          task: document.getElementById('transcribeTask').value,
+          vad: document.getElementById('transcribeVad').checked,
+          onProgress: (frac, msg) => {
+            progressBar.style.width = `${Math.round(frac * 100)}%`;
+            progressText.textContent = `${msg} (${Math.round(frac * 100)}%)`;
+          }
+        });
+
+        lastTranscription = result;
+        const count = applyTranscription(result, readSegmentSettings());
+
+        if (count === 0) {
+          toast('The model did not find any speech in this media.', 'warn', 6000);
+          progressText.textContent = 'No speech detected.';
+        } else {
+          const lang = result.language ? ` (${result.language})` : '';
+          toast(`Transcribed into ${count} captions${lang}. Adjust the segmentation sliders to re-cut them instantly.`,
+            'success', 8000);
+          progressText.textContent = `Done — ${count} captions.`;
+          modal.classList.add('hidden');
+        }
+      } catch (err) {
+        const msg = err.message || String(err);
+        if (msg === 'Cancelled.') {
+          progressText.textContent = 'Cancelled.';
+        } else {
+          note.className = 'export-note err';
+          note.textContent = msg;
+          progressText.textContent = 'Failed.';
+          toast(`Transcription failed: ${msg}`, 'error', 9000);
+        }
+      } finally {
+        running = false;
+        startBtn.disabled = false;
+      }
+    });
+  }
+
   // --- Keyboard Shortcuts ---
   function bindKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
@@ -861,13 +1062,16 @@ document.addEventListener('DOMContentLoaded', () => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
 
       const exportOpen = !document.getElementById('exportModal').classList.contains('hidden');
+      const transcribeOpen = !document.getElementById('transcribeModal').classList.contains('hidden');
 
       if (e.key === 'Escape') {
         document.getElementById('shortcutsModal').classList.add('hidden');
         document.getElementById('exportModal').classList.add('hidden');
+        document.getElementById('transcribeModal').classList.add('hidden');
         return;
       }
-      if (exportOpen) return; // don't drive the editor while the export dialog is up
+      // Don't drive the editor while a dialog is up
+      if (exportOpen || transcribeOpen) return;
 
       switch (e.code) {
         case 'Space':
@@ -914,6 +1118,9 @@ document.addEventListener('DOMContentLoaded', () => {
           break;
         case 'e':
           document.getElementById('btnExportAlpha').click();
+          break;
+        case 't':
+          document.getElementById('btnTranscribe').click();
           break;
         case 'm': {
           const isMuted = playerController.toggleMute();

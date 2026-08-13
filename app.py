@@ -10,6 +10,8 @@ import http.server
 import socketserver
 import uuid
 
+from transcriber import Transcriber
+
 try:
     import webview
 except ImportError:  # pragma: no cover - only hit when pywebview is missing
@@ -76,6 +78,7 @@ class ExportApi:
     def __init__(self):
         self.jobs = {}
         self._lock = threading.Lock()
+        self.transcriber = Transcriber()
 
     # --- capability probe -------------------------------------------------
     def get_capabilities(self):
@@ -86,6 +89,28 @@ class ExportApi:
             'ffmpeg': bool(ffmpeg),
             'ffmpeg_path': ffmpeg or '',
         }
+
+    # --- AI transcription (see transcriber.py) ----------------------------
+    def transcribe_probe(self):
+        return self.transcriber.probe()
+
+    def transcribe_begin(self, options):
+        return self.transcriber.begin(options)
+
+    def transcribe_push_audio(self, job_id, b64_chunk):
+        return self.transcriber.push_audio(job_id, b64_chunk)
+
+    def transcribe_finish_audio(self, job_id):
+        return self.transcriber.finish_audio_and_run(job_id)
+
+    def transcribe_status(self, job_id):
+        return self.transcriber.status(job_id)
+
+    def transcribe_cancel(self, job_id):
+        return self.transcriber.cancel(job_id)
+
+    def transcribe_cleanup(self, job_id):
+        return self.transcriber.cleanup(job_id)
 
     # --- export lifecycle -------------------------------------------------
     def begin_export(self, meta):
@@ -237,6 +262,12 @@ if __name__ == '__main__':
         print("ffmpeg NOT found — alpha export will fall back to a PNG sequence.")
 
     api = ExportApi()
+
+    _probe = api.transcribe_probe()
+    if _probe.get('available'):
+        print(f"AI transcription ready via {', '.join(_probe['engines'])} on {_probe['device_name']}.")
+    else:
+        print("AI transcription unavailable — run 'pip install -r requirements.txt' to enable it.")
 
     # Launch Native PyWebView Standalone Desktop Window
     webview.create_window(
