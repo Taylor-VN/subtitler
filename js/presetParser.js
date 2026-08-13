@@ -1,6 +1,15 @@
 /**
  * Premiere Pro Subtitle & Text Style Preset Parser
- * Parses Premiere Pro (.prfpset / .prtextstyle) XML documents and JSON configurations
+ *
+ * Handles Premiere Pro (.prfpset / .prtextstyle) documents and JSON configs.
+ * Premiere writes these as XML wrapped in <PremiereData>, sometimes gzipped and
+ * sometimes with the interesting values buried in <Parameter Name="..."> nodes
+ * or in attributes, so the lookup below sweeps tag names, Name= attributes and
+ * finally the raw text before giving up.
+ *
+ * Style numbers are expressed against a 1080-pixel-tall reference frame; the
+ * renderer scales them by project.height / 1080 so a preset looks the same in
+ * 16:9, 1:1, 4:5 and 9:16.
  */
 
 class PresetParser {
@@ -10,79 +19,79 @@ class PresetParser {
         id: 'classic_yellow',
         name: 'Classic Film Yellow (Premiere Pro)',
         fontFamily: 'Inter',
-        fontSize: 44,
+        fontSize: 66,
         fontWeightBold: true,
         fontStyleItalic: false,
         textUppercase: false,
         fillColor: '#ffea00',
         enableStroke: true,
         strokeColor: '#000000',
-        strokeWidth: 6,
+        strokeWidth: 5,
         enableBgBox: false,
         bgBoxColor: '#000000',
         bgBoxOpacity: 75,
-        bgBoxPadding: 12,
+        bgBoxPadding: 18,
         enableShadow: true,
         shadowColor: '#000000',
-        shadowBlur: 8,
-        shadowOffsetY: 4,
+        shadowBlur: 12,
+        shadowOffsetY: 6,
         align: 'bottom-center',
-        bottomMargin: 50,
+        bottomMargin: 75,
         animationPreset: 'none'
       },
       tiktok_pop: {
         id: 'tiktok_pop',
         name: 'TikTok Pop (Bold Cyan Stroke)',
         fontFamily: 'Montserrat',
-        fontSize: 48,
+        fontSize: 72,
         fontWeightBold: true,
         fontStyleItalic: false,
         textUppercase: true,
         fillColor: '#ffffff',
         enableStroke: true,
         strokeColor: '#00d2ff',
-        strokeWidth: 8,
+        strokeWidth: 7,
         enableBgBox: false,
         bgBoxColor: '#000000',
         bgBoxOpacity: 80,
-        bgBoxPadding: 10,
+        bgBoxPadding: 15,
         enableShadow: true,
         shadowColor: '#000000',
-        shadowBlur: 10,
-        shadowOffsetY: 6,
+        shadowBlur: 15,
+        shadowOffsetY: 9,
         align: 'bottom-center',
-        bottomMargin: 60,
+        bottomMargin: 90,
         animationPreset: 'pop'
       },
       netflix_clean: {
         id: 'netflix_clean',
         name: 'Netflix Clean (Bottom Center)',
         fontFamily: 'Inter',
-        fontSize: 38,
+        fontSize: 57,
         fontWeightBold: false,
         fontStyleItalic: false,
         textUppercase: false,
         fillColor: '#ffffff',
         enableStroke: true,
         strokeColor: '#000000',
-        strokeWidth: 4,
+        strokeWidth: 3,
         enableBgBox: false,
         bgBoxColor: '#000000',
         bgBoxOpacity: 60,
-        bgBoxPadding: 8,
+        bgBoxPadding: 12,
         enableShadow: true,
         shadowColor: '#000000',
-        shadowBlur: 6,
-        shadowOffsetY: 3,
+        shadowBlur: 9,
+        shadowOffsetY: 4,
         align: 'bottom-center',
-        bottomMargin: 45,
+        bottomMargin: 68,
         animationPreset: 'none'
       },
       cinematic_boxed: {
         id: 'cinematic_boxed',
         name: 'Cinematic Black Box',
         fontFamily: 'Roboto',
-        fontSize: 40,
+        fontSize: 60,
         fontWeightBold: true,
         fontStyleItalic: false,
         textUppercase: false,
@@ -93,44 +102,44 @@ class PresetParser {
         enableBgBox: true,
         bgBoxColor: '#000000',
         bgBoxOpacity: 85,
-        bgBoxPadding: 14,
+        bgBoxPadding: 21,
         enableShadow: false,
         shadowColor: '#000000',
         shadowBlur: 0,
         shadowOffsetY: 0,
         align: 'bottom-center',
-        bottomMargin: 55,
+        bottomMargin: 83,
         animationPreset: 'fade'
       },
       cyber_neon: {
         id: 'cyber_neon',
         name: 'Cyber Neon Glow',
         fontFamily: 'Outfit',
-        fontSize: 46,
+        fontSize: 69,
         fontWeightBold: true,
         fontStyleItalic: false,
         textUppercase: true,
         fillColor: '#00ffff',
         enableStroke: true,
         strokeColor: '#ff00ff',
-        strokeWidth: 4,
+        strokeWidth: 3,
         enableBgBox: false,
         bgBoxColor: '#121212',
         bgBoxOpacity: 90,
-        bgBoxPadding: 10,
+        bgBoxPadding: 15,
         enableShadow: true,
         shadowColor: '#00ffff',
-        shadowBlur: 16,
+        shadowBlur: 24,
         shadowOffsetY: 0,
         align: 'bottom-center',
-        bottomMargin: 50,
+        bottomMargin: 75,
         animationPreset: 'karaoke'
       },
       minimal_white: {
         id: 'minimal_white',
         name: 'Minimal White Shadow',
         fontFamily: 'Inter',
-        fontSize: 36,
+        fontSize: 54,
         fontWeightBold: true,
         fontStyleItalic: false,
         textUppercase: false,
@@ -141,13 +150,13 @@ class PresetParser {
         enableBgBox: false,
         bgBoxColor: '#000000',
         bgBoxOpacity: 50,
-        bgBoxPadding: 6,
+        bgBoxPadding: 9,
         enableShadow: true,
-        shadowColor: 'rgba(0,0,0,0.8)',
-        shadowBlur: 10,
-        shadowOffsetY: 4,
+        shadowColor: '#000000',
+        shadowBlur: 15,
+        shadowOffsetY: 6,
         align: 'bottom-center',
-        bottomMargin: 40,
+        bottomMargin: 60,
         animationPreset: 'none'
       }
     };
@@ -157,124 +166,287 @@ class PresetParser {
     return this.defaultPresets[id] || this.defaultPresets['classic_yellow'];
   }
 
+  listPresets() {
+    return Object.values(this.defaultPresets);
+  }
+
+  addPreset(preset) {
+    this.defaultPresets[preset.id] = preset;
+    return preset;
+  }
+
   /**
-   * Parse uploaded Premiere Pro preset (.prfpset / .prtextstyle / XML / JSON)
+   * Parse an uploaded Premiere Pro preset.
+   * @param {string} fileContent decoded text content
+   * @param {string} fileName    original file name (used as the preset name)
    */
   parsePresetFile(fileContent, fileName) {
+    const baseName = (fileName || 'Imported Preset').replace(/\.[^/.]+$/, '');
     try {
-      // Try JSON format
-      if (fileContent.trim().startsWith('{')) {
-        const parsed = JSON.parse(fileContent);
-        return this.normalizePreset(parsed, fileName);
+      const trimmed = (fileContent || '').trim();
+
+      // JSON style config
+      if (trimmed.startsWith('{')) {
+        const parsed = JSON.parse(trimmed);
+        if (!parsed.name) parsed.name = baseName;
+        return this.normalizePreset(parsed, baseName);
       }
 
-      // Try XML parsing for Premiere Pro .prfpset / .prtextstyle
-      const parser = new DOMParser();
-      const xmlDoc = parser.parseFromString(fileContent, 'text/xml');
-      
-      const fontNode = xmlDoc.querySelector('FontFamily, Font, TextFont');
-      const sizeNode = xmlDoc.querySelector('FontSize, Size');
-      const fillColorNode = xmlDoc.querySelector('FillColor, Color, TextColor');
-      const strokeColorNode = xmlDoc.querySelector('StrokeColor, OutlineColor');
-      const strokeWidthNode = xmlDoc.querySelector('StrokeWidth, OutlineWidth');
-      const shadowNode = xmlDoc.querySelector('DropShadow, Shadow');
-      const bgNode = xmlDoc.querySelector('Background, BackgroundBox');
-      const alignNode = xmlDoc.querySelector('Alignment, Align');
+      if (!trimmed) throw new Error('Preset file is empty.');
 
-      const preset = {
-        name: fileName.replace(/\.[^/.]+$/, ''),
-        fontFamily: fontNode ? fontNode.textContent.trim() : 'Inter',
-        fontSize: sizeNode ? parseInt(sizeNode.textContent.trim(), 10) : 42,
-        fontWeightBold: true,
-        fontStyleItalic: false,
-        textUppercase: false,
-        fillColor: fillColorNode ? this.parseColorString(fillColorNode.textContent) : '#ffea00',
-        enableStroke: !!strokeColorNode,
-        strokeColor: strokeColorNode ? this.parseColorString(strokeColorNode.textContent) : '#000000',
-        strokeWidth: strokeWidthNode ? parseInt(strokeWidthNode.textContent, 10) : 6,
-        enableBgBox: !!bgNode,
-        bgBoxColor: bgNode ? this.parseColorString(bgNode.textContent) : '#000000',
-        bgBoxOpacity: 75,
-        bgBoxPadding: 12,
-        enableShadow: !!shadowNode,
-        shadowColor: '#000000',
-        shadowBlur: 8,
-        shadowOffsetY: 4,
-        align: alignNode ? alignNode.textContent.trim().toLowerCase() : 'bottom-center',
-        bottomMargin: 50,
-        animationPreset: 'none'
+      const parser = new DOMParser();
+      const xmlDoc = parser.parseFromString(trimmed, 'text/xml');
+      const parseError = xmlDoc.querySelector('parsererror');
+      const doc = parseError ? null : xmlDoc;
+
+      const lookup = (names, fallback) => {
+        const fromXml = doc ? this.findValue(doc, names) : null;
+        if (fromXml !== null && fromXml !== undefined && fromXml !== '') return fromXml;
+        const fromRaw = this.findValueInRawText(trimmed, names);
+        return (fromRaw !== null && fromRaw !== '') ? fromRaw : fallback;
       };
 
-      return this.normalizePreset(preset, fileName);
+      const fontSize = this.toNumber(lookup(
+        ['FontSize', 'Size', 'TextSize', 'PointSize', 'fontSize'], null));
+      const strokeWidth = this.toNumber(lookup(
+        ['StrokeWidth', 'OutlineWidth', 'EdgeWidth', 'strokeWidth'], null));
+      const fillColorRaw = lookup(['FillColor', 'TextColor', 'FontColor', 'Color', 'fillColor'], null);
+      const strokeColorRaw = lookup(['StrokeColor', 'OutlineColor', 'EdgeColor', 'strokeColor'], null);
+      const bgColorRaw = lookup(['BackgroundColor', 'BackgroundBoxColor', 'BackColor', 'bgBoxColor'], null);
+      const shadowColorRaw = lookup(['ShadowColor', 'DropShadowColor', 'shadowColor'], null);
+
+      const strokeEnabled = this.toBool(lookup(
+        ['StrokeEnabled', 'OutlineEnabled', 'EnableStroke', 'enableStroke'], null));
+      const bgEnabled = this.toBool(lookup(
+        ['BackgroundBoxEnabled', 'BackgroundEnabled', 'EnableBackground', 'enableBgBox'], null));
+      const shadowEnabled = this.toBool(lookup(
+        ['ShadowEnabled', 'DropShadowEnabled', 'EnableShadow', 'enableShadow'], null));
+
+      const preset = {
+        name: lookup(['PresetName', 'StyleName', 'Name'], baseName) || baseName,
+        fontFamily: lookup(['FontFamily', 'TextFont', 'FontName', 'Font', 'fontFamily'], 'Inter'),
+        // Premiere point sizes are authored against a 1080-tall frame already.
+        fontSize: fontSize !== null ? Math.round(fontSize) : 66,
+        fontWeightBold: this.toBool(lookup(['Bold', 'FontBold', 'fontWeightBold'], null)) !== false,
+        fontStyleItalic: this.toBool(lookup(['Italic', 'FontItalic', 'fontStyleItalic'], null)) === true,
+        textUppercase: this.toBool(lookup(['AllCaps', 'Uppercase', 'textUppercase'], null)) === true,
+        fillColor: this.parseColorString(fillColorRaw) || '#ffea00',
+        enableStroke: strokeEnabled !== null ? strokeEnabled : (!!strokeColorRaw || (strokeWidth || 0) > 0),
+        strokeColor: this.parseColorString(strokeColorRaw) || '#000000',
+        strokeWidth: strokeWidth !== null ? Math.round(strokeWidth) : 5,
+        enableBgBox: bgEnabled !== null ? bgEnabled : !!bgColorRaw,
+        bgBoxColor: this.parseColorString(bgColorRaw) || '#000000',
+        bgBoxOpacity: this.toNumber(lookup(['BackgroundOpacity', 'BackgroundBoxOpacity', 'bgBoxOpacity'], null)) ?? 75,
+        bgBoxPadding: this.toNumber(lookup(['BackgroundPadding', 'BackgroundBoxPadding', 'bgBoxPadding'], null)) ?? 18,
+        enableShadow: shadowEnabled !== null ? shadowEnabled : !!shadowColorRaw,
+        shadowColor: this.parseColorString(shadowColorRaw) || '#000000',
+        shadowBlur: this.toNumber(lookup(['ShadowBlur', 'ShadowSoftness', 'shadowBlur'], null)) ?? 12,
+        shadowOffsetY: this.toNumber(lookup(['ShadowOffsetY', 'ShadowDistance', 'shadowOffsetY'], null)) ?? 6,
+        align: this.normalizeAlign(lookup(['Alignment', 'Align', 'TextAlignment', 'align'], null)),
+        bottomMargin: this.toNumber(lookup(['BottomMargin', 'SafeMargin', 'bottomMargin'], null)) ?? 75,
+        animationPreset: lookup(['Animation', 'AnimationPreset', 'animationPreset'], 'none')
+      };
+
+      return this.normalizePreset(preset, baseName);
     } catch (e) {
       console.warn('Failed XML/JSON parse for preset, falling back to default:', e);
-      return this.defaultPresets['classic_yellow'];
+      return { ...this.defaultPresets['classic_yellow'], name: baseName + ' (unreadable — defaults used)' };
     }
   }
 
-  parseColorString(colorStr) {
-    if (!colorStr) return '#ffffff';
-    colorStr = colorStr.trim();
-    if (colorStr.startsWith('#')) return colorStr;
-    if (colorStr.startsWith('0x')) return '#' + colorStr.slice(2);
-    // RGBA comma separated integers
-    const parts = colorStr.split(',').map(p => parseInt(p.trim(), 10));
-    if (parts.length >= 3) {
-      const r = parts[0].toString(16).padStart(2, '0');
-      const g = parts[1].toString(16).padStart(2, '0');
-      const b = parts[2].toString(16).padStart(2, '0');
-      return `#${r}${g}${b}`;
+  /** Search the document for a tag, a Name="..." parameter node, or an attribute. */
+  findValue(doc, names) {
+    const wanted = names.map(n => n.toLowerCase());
+    const all = doc.getElementsByTagName('*');
+
+    for (let i = 0; i < all.length; i++) {
+      const el = all[i];
+      const tag = (el.localName || el.nodeName || '').toLowerCase();
+
+      if (wanted.includes(tag)) {
+        const direct = this.elementValue(el);
+        if (direct) return direct;
+      }
+
+      // <Parameter Name="FontSize"><Value>72</Value></Parameter>
+      const nameAttr = (el.getAttribute('Name') || el.getAttribute('name') || '').toLowerCase();
+      if (nameAttr && wanted.includes(nameAttr)) {
+        const valueAttr = el.getAttribute('Value') || el.getAttribute('value');
+        if (valueAttr) return valueAttr.trim();
+        const direct = this.elementValue(el);
+        if (direct) return direct;
+      }
+
+      // Attribute named directly after the property
+      for (const w of wanted) {
+        for (const attr of el.attributes || []) {
+          if (attr.name.toLowerCase() === w && attr.value.trim()) return attr.value.trim();
+        }
+      }
     }
-    return '#ffffff';
+    return null;
+  }
+
+  elementValue(el) {
+    const child = el.querySelector && el.querySelector('Value, value');
+    if (child && child.textContent.trim()) return child.textContent.trim();
+    const text = (el.textContent || '').trim();
+    // Ignore container nodes whose text is just the concatenation of children.
+    if (text && el.children.length === 0) return text;
+    return null;
+  }
+
+  /** Last resort for binary-ish .prtextstyle payloads: scan the raw bytes as text. */
+  findValueInRawText(raw, names) {
+    for (const name of names) {
+      const patterns = [
+        new RegExp(`<${name}[^>]*>([^<]{1,120})</${name}>`, 'i'),
+        new RegExp(`["']${name}["']\\s*[:=]\\s*["']?([^,"'}\\s<]{1,120})`, 'i'),
+        new RegExp(`${name}\\s*=\\s*["']([^"']{1,120})["']`, 'i')
+      ];
+      for (const re of patterns) {
+        const m = raw.match(re);
+        if (m && m[1] && m[1].trim()) return m[1].trim();
+      }
+    }
+    return null;
+  }
+
+  toNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const n = parseFloat(String(value).replace(/[^0-9.+-]/g, ''));
+    return isNaN(n) ? null : n;
+  }
+
+  toBool(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const s = String(value).trim().toLowerCase();
+    if (['true', '1', 'yes', 'on', 'enabled'].includes(s)) return true;
+    if (['false', '0', 'no', 'off', 'disabled'].includes(s)) return false;
+    return null;
+  }
+
+  normalizeAlign(value) {
+    if (!value) return 'bottom-center';
+    const s = String(value).trim().toLowerCase().replace(/[\s_]+/g, '-');
+    const valid = [
+      'top-left', 'top-center', 'top-right',
+      'center-left', 'center', 'center-right',
+      'bottom-left', 'bottom-center', 'bottom-right'
+    ];
+    if (valid.includes(s)) return s;
+    // Premiere sometimes stores just "Center" / "Left" / "Bottom"
+    if (s === 'left') return 'bottom-left';
+    if (s === 'right') return 'bottom-right';
+    if (s === 'bottom' || s === 'centre') return 'bottom-center';
+    if (s === 'top') return 'top-center';
+    if (s === 'middle') return 'center';
+    return 'bottom-center';
+  }
+
+  /**
+   * Accepts #rrggbb, 0xRRGGBB, "r,g,b", "r g b a", Premiere floats
+   * ("1.0 0.92 0.0"), and packed ARGB integers.
+   */
+  parseColorString(colorStr) {
+    if (colorStr === null || colorStr === undefined) return null;
+    let s = String(colorStr).trim();
+    if (!s) return null;
+
+    if (/^#[0-9a-f]{3}$/i.test(s)) {
+      return '#' + s.slice(1).split('').map(c => c + c).join('');
+    }
+    if (/^#[0-9a-f]{6}$/i.test(s)) return s.toLowerCase();
+    if (/^#[0-9a-f]{8}$/i.test(s)) return '#' + s.slice(3).toLowerCase(); // #aarrggbb
+    if (/^0x[0-9a-f]{6}$/i.test(s)) return '#' + s.slice(2).toLowerCase();
+    if (/^0x[0-9a-f]{8}$/i.test(s)) return '#' + s.slice(4).toLowerCase();
+
+    const parts = s.split(/[\s,]+/).map(p => parseFloat(p)).filter(n => !isNaN(n));
+    if (parts.length >= 3) {
+      // Premiere writes normalised floats; anything <= 1 across the board is 0-1.
+      const isFloat = parts.slice(0, 3).every(n => n >= 0 && n <= 1) &&
+                      parts.slice(0, 3).some(n => n > 0 && n < 1);
+      const chans = parts.length >= 4 && parts[0] <= 1 && !isFloat
+        ? parts.slice(1, 4)   // ARGB byte order
+        : parts.slice(0, 3);
+      const toHex = (n) => {
+        const v = Math.round(isFloat ? n * 255 : n);
+        return Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0');
+      };
+      return '#' + chans.map(toHex).join('');
+    }
+
+    // Packed integer (e.g. 4294958336 = 0xFFFFEA00)
+    if (/^\d+$/.test(s)) {
+      const num = parseInt(s, 10);
+      if (num > 0xFFFFFF) return '#' + (num & 0xFFFFFF).toString(16).padStart(6, '0');
+      return '#' + num.toString(16).padStart(6, '0');
+    }
+
+    return null;
   }
 
   normalizePreset(presetObj, nameFallback) {
+    const num = (v, d) => {
+      const n = this.toNumber(v);
+      return n === null ? d : n;
+    };
     return {
-      id: 'custom_' + Date.now(),
+      id: presetObj.id || 'custom_' + Date.now(),
       name: presetObj.name || nameFallback || 'Imported Premiere Preset',
       fontFamily: presetObj.fontFamily || 'Inter',
-      fontSize: presetObj.fontSize || 42,
-      fontWeightBold: presetObj.fontWeightBold !== undefined ? presetObj.fontWeightBold : true,
+      fontSize: num(presetObj.fontSize, 66),
+      fontWeightBold: presetObj.fontWeightBold !== undefined ? !!presetObj.fontWeightBold : true,
       fontStyleItalic: !!presetObj.fontStyleItalic,
       textUppercase: !!presetObj.textUppercase,
-      fillColor: presetObj.fillColor || '#ffea00',
-      enableStroke: presetObj.enableStroke !== undefined ? presetObj.enableStroke : true,
-      strokeColor: presetObj.strokeColor || '#000000',
-      strokeWidth: presetObj.strokeWidth || 6,
+      fillColor: this.parseColorString(presetObj.fillColor) || '#ffea00',
+      enableStroke: presetObj.enableStroke !== undefined ? !!presetObj.enableStroke : true,
+      strokeColor: this.parseColorString(presetObj.strokeColor) || '#000000',
+      strokeWidth: num(presetObj.strokeWidth, 5),
       enableBgBox: !!presetObj.enableBgBox,
-      bgBoxColor: presetObj.bgBoxColor || '#000000',
-      bgBoxOpacity: presetObj.bgBoxOpacity !== undefined ? presetObj.bgBoxOpacity : 75,
-      bgBoxPadding: presetObj.bgBoxPadding || 12,
-      enableShadow: presetObj.enableShadow !== undefined ? presetObj.enableShadow : true,
-      shadowColor: presetObj.shadowColor || '#000000',
-      shadowBlur: presetObj.shadowBlur || 8,
-      shadowOffsetY: presetObj.shadowOffsetY || 4,
-      align: presetObj.align || 'bottom-center',
-      bottomMargin: presetObj.bottomMargin || 50,
-      animationPreset: presetObj.animationPreset || 'none'
+      bgBoxColor: this.parseColorString(presetObj.bgBoxColor) || '#000000',
+      bgBoxOpacity: num(presetObj.bgBoxOpacity, 75),
+      bgBoxPadding: num(presetObj.bgBoxPadding, 18),
+      enableShadow: presetObj.enableShadow !== undefined ? !!presetObj.enableShadow : true,
+      shadowColor: this.parseColorString(presetObj.shadowColor) || '#000000',
+      shadowBlur: num(presetObj.shadowBlur, 12),
+      shadowOffsetY: num(presetObj.shadowOffsetY, 6),
+      align: this.normalizeAlign(presetObj.align),
+      bottomMargin: num(presetObj.bottomMargin, 75),
+      animationPreset: ['none', 'fade', 'pop', 'karaoke'].includes(presetObj.animationPreset)
+        ? presetObj.animationPreset : 'none'
     };
   }
 
   exportPresetToXml(preset) {
+    const esc = (v) => String(v === undefined || v === null ? '' : v)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
     return `<?xml version="1.0" encoding="UTF-8"?>
-<PremiereData Version="1.0">
-  <TextPreset Name="${preset.name}">
-    <FontFamily>${preset.fontFamily}</FontFamily>
-    <FontSize>${preset.fontSize}</FontSize>
-    <FillColor>${preset.fillColor}</FillColor>
-    <StrokeEnabled>${preset.enableStroke}</StrokeEnabled>
-    <StrokeColor>${preset.strokeColor}</StrokeColor>
-    <StrokeWidth>${preset.strokeWidth}</StrokeWidth>
-    <BackgroundBoxEnabled>${preset.enableBgBox}</BackgroundBoxEnabled>
-    <BackgroundBoxColor>${preset.bgBoxColor}</BackgroundBoxColor>
-    <BackgroundBoxOpacity>${preset.bgBoxOpacity}</BackgroundBoxOpacity>
-    <BackgroundBoxPadding>${preset.bgBoxPadding}</BackgroundBoxPadding>
-    <ShadowEnabled>${preset.enableShadow}</ShadowEnabled>
-    <ShadowColor>${preset.shadowColor}</ShadowColor>
-    <ShadowBlur>${preset.shadowBlur}</ShadowBlur>
-    <ShadowOffsetY>${preset.shadowOffsetY}</ShadowOffsetY>
-    <Alignment>${preset.align}</Alignment>
-    <BottomMargin>${preset.bottomMargin}</BottomMargin>
+<PremiereData Version="3">
+  <TextPreset Name="${esc(preset.name)}">
+    <PresetName>${esc(preset.name)}</PresetName>
+    <FontFamily>${esc(preset.fontFamily)}</FontFamily>
+    <FontSize>${esc(preset.fontSize)}</FontSize>
+    <Bold>${esc(!!preset.fontWeightBold)}</Bold>
+    <Italic>${esc(!!preset.fontStyleItalic)}</Italic>
+    <AllCaps>${esc(!!preset.textUppercase)}</AllCaps>
+    <FillColor>${esc(preset.fillColor)}</FillColor>
+    <StrokeEnabled>${esc(!!preset.enableStroke)}</StrokeEnabled>
+    <StrokeColor>${esc(preset.strokeColor)}</StrokeColor>
+    <StrokeWidth>${esc(preset.strokeWidth)}</StrokeWidth>
+    <BackgroundBoxEnabled>${esc(!!preset.enableBgBox)}</BackgroundBoxEnabled>
+    <BackgroundBoxColor>${esc(preset.bgBoxColor)}</BackgroundBoxColor>
+    <BackgroundBoxOpacity>${esc(preset.bgBoxOpacity)}</BackgroundBoxOpacity>
+    <BackgroundBoxPadding>${esc(preset.bgBoxPadding)}</BackgroundBoxPadding>
+    <ShadowEnabled>${esc(!!preset.enableShadow)}</ShadowEnabled>
+    <ShadowColor>${esc(preset.shadowColor)}</ShadowColor>
+    <ShadowBlur>${esc(preset.shadowBlur)}</ShadowBlur>
+    <ShadowOffsetY>${esc(preset.shadowOffsetY)}</ShadowOffsetY>
+    <Alignment>${esc(preset.align)}</Alignment>
+    <BottomMargin>${esc(preset.bottomMargin)}</BottomMargin>
+    <AnimationPreset>${esc(preset.animationPreset)}</AnimationPreset>
   </TextPreset>
 </PremiereData>`;
   }

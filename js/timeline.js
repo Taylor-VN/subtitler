@@ -25,10 +25,23 @@ class TimelineController {
   }
 
   initEvents() {
-    this.subManager.onChange(() => this.renderClips());
+    this.subManager.onChange(() => {
+      // Grow the timeline if captions now run past the end of it.
+      const wanted = this.computeDuration(this.player.getDuration());
+      if (Math.abs(wanted - this.duration) > 0.5) {
+        this.duration = wanted;
+        this.resizeAndDraw();
+      } else {
+        this.renderClips();
+      }
+    });
 
     this.player.onTimeUpdate((currentTime, duration) => {
-      if (duration && duration > 0) this.duration = Math.max(30, duration);
+      const wanted = this.computeDuration(duration);
+      if (Math.abs(wanted - this.duration) > 0.5) {
+        this.duration = wanted;
+        this.resizeAndDraw();
+      }
       this.updatePlayheadPosition(currentTime);
     });
 
@@ -79,9 +92,21 @@ class TimelineController {
   setZoom(pxPerSec) {
     this.zoomLevel = Math.max(10, Math.min(300, pxPerSec));
     this.resizeAndDraw();
+    return this.zoomLevel;
+  }
+
+  /** Timeline must always be long enough to hold the media AND every caption. */
+  computeDuration(mediaDuration) {
+    const subs = this.subManager.getSubtitles();
+    const lastCaptionEnd = subs.length ? Math.max(...subs.map(s => s.end)) : 0;
+    const media = (mediaDuration && isFinite(mediaDuration) && mediaDuration > 0)
+      ? mediaDuration
+      : this.player.getDuration();
+    return Math.max(30, media, lastCaptionEnd + 5);
   }
 
   resizeAndDraw() {
+    this.duration = this.computeDuration(this.player.getDuration());
     const totalWidth = Math.max(800, this.duration * this.zoomLevel);
     
     // Resize Canvas elements
@@ -96,7 +121,7 @@ class TimelineController {
     this.drawRuler();
     this.drawWaveform();
     this.renderClips();
-    this.updatePlayheadPosition(this.player.video.currentTime || 0);
+    this.updatePlayheadPosition(this.player.getCurrentTime());
   }
 
   // --- Draw 25 FPS Timeline Ruler ---
@@ -113,25 +138,39 @@ class TimelineController {
     ctx.fillStyle = '#9e9e9e';
     ctx.font = '10px "Roboto Mono", monospace';
 
-    const stepSec = this.zoomLevel < 30 ? 5 : (this.zoomLevel < 80 ? 1 : 0.5);
+    // Pick the tick spacing that keeps labels from colliding at this zoom.
+    const labelWidth = ctx.measureText('00:00:00:00').width + 14;
+    const candidates = [0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+    const majorStep = candidates.find(step => step * this.zoomLevel >= labelWidth)
+      || candidates[candidates.length - 1];
+    // Minor ticks subdivide the major step without ever going below one frame.
+    const minorStep = Math.max(1 / this.fps, majorStep / 5);
 
-    for (let sec = 0; sec <= this.duration; sec += stepSec) {
+    for (let sec = 0; sec <= this.duration + majorStep; sec += majorStep) {
       const x = sec * this.zoomLevel;
+
       ctx.beginPath();
       ctx.moveTo(x, h - 10);
       ctx.lineTo(x, h);
       ctx.stroke();
 
-      const tc = this.subManager.secondsToTimecode(sec, this.fps);
-      ctx.fillText(tc, x + 4, 12);
+      ctx.fillText(this.subManager.secondsToTimecode(sec, this.fps), x + 4, 12);
 
-      // Minor frame tick marks @ 25 FPS if zoomed in
-      if (this.zoomLevel >= 80) {
-        const frameStep = 1 / 25; // 0.04s per frame
-        for (let f = 1; f < 25; f++) {
-          const fx = (sec + (f * frameStep)) * this.zoomLevel;
+      // Minor ticks between this label and the next
+      for (let t = sec + minorStep; t < sec + majorStep - 1e-9; t += minorStep) {
+        const mx = t * this.zoomLevel;
+        ctx.beginPath();
+        ctx.moveTo(mx, h - 4);
+        ctx.lineTo(mx, h);
+        ctx.stroke();
+      }
+
+      // Individual frame ticks only once a frame is comfortably wide
+      if (this.zoomLevel / this.fps >= 4) {
+        for (let f = 1; f < majorStep * this.fps; f++) {
+          const fx = (sec + f / this.fps) * this.zoomLevel;
           ctx.beginPath();
-          ctx.moveTo(fx, h - (f % 5 === 0 ? 6 : 3));
+          ctx.moveTo(fx, h - 2);
           ctx.lineTo(fx, h);
           ctx.stroke();
         }
@@ -149,27 +188,75 @@ class TimelineController {
     ctx.fillStyle = '#151515';
     ctx.fillRect(0, 0, w, h);
 
-    ctx.fillStyle = 'rgba(0, 210, 255, 0.25)';
     ctx.strokeStyle = 'rgba(0, 210, 255, 0.6)';
     ctx.lineWidth = 1;
 
-    // Draw stylized audio waveform bars
     const barWidth = 3;
     const gap = 1;
-    const totalBars = Math.floor(w / (barWidth + gap));
+    const step = barWidth + gap;
+    const totalBars = Math.floor(w / step);
 
     ctx.beginPath();
     for (let i = 0; i < totalBars; i++) {
-      const x = i * (barWidth + gap);
-      // Pseudo waveform pattern
-      const amp = Math.abs(Math.sin(i * 0.15) * Math.cos(i * 0.04) * (h * 0.4)) + (Math.random() * 4);
-      const y1 = (h / 2) - amp;
-      const y2 = (h / 2) + amp;
+      const x = i * step;
+      const timeSec = x / this.zoomLevel;
+      const amp = this.peaks
+        ? this.peakAt(timeSec) * (h * 0.46)
+        // Deterministic stand-in pattern — no Math.random(), so redraws are stable.
+        : Math.abs(Math.sin(i * 0.15) * Math.cos(i * 0.04)) * (h * 0.4);
 
-      ctx.moveTo(x, y1);
-      ctx.lineTo(x, y2);
+      ctx.moveTo(x, (h / 2) - amp);
+      ctx.lineTo(x, (h / 2) + amp);
     }
     ctx.stroke();
+  }
+
+  /** Peak amplitude (0..1) at a given time, from the decoded peaks array. */
+  peakAt(timeSec) {
+    if (!this.peaks || !this.peaksDuration) return 0;
+    const idx = Math.floor((timeSec / this.peaksDuration) * this.peaks.length);
+    if (idx < 0 || idx >= this.peaks.length) return 0;
+    return this.peaks[idx];
+  }
+
+  /** Decode the loaded media's audio and build a real peaks array. */
+  async loadAudioWaveform(file) {
+    this.peaks = null;
+    this.peaksDuration = 0;
+    this.drawWaveform();
+    if (!file) return;
+
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const arrayBuffer = await file.arrayBuffer();
+      const audioCtx = new AudioCtx();
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+      const channel = audioBuffer.getChannelData(0);
+      const bucketCount = 4000;
+      const samplesPerBucket = Math.max(1, Math.floor(channel.length / bucketCount));
+      const peaks = new Float32Array(bucketCount);
+
+      for (let b = 0; b < bucketCount; b++) {
+        const startIdx = b * samplesPerBucket;
+        let peak = 0;
+        for (let s = 0; s < samplesPerBucket; s++) {
+          const v = Math.abs(channel[startIdx + s] || 0);
+          if (v > peak) peak = v;
+        }
+        peaks[b] = peak;
+      }
+
+      this.peaks = peaks;
+      this.peaksDuration = audioBuffer.duration;
+      audioCtx.close();
+      this.drawWaveform();
+    } catch (e) {
+      console.warn('Could not decode audio for the waveform:', e);
+      this.peaks = null;
+      this.drawWaveform();
+    }
   }
 
   // --- Update Playhead Position ---
@@ -263,35 +350,51 @@ class TimelineController {
     document.body.style.cursor = mode === 'move' ? 'grabbing' : 'ew-resize';
   }
 
+  /**
+   * Candidate snap points: the playhead plus every *other* clip's in/out point.
+   * The threshold is in pixels so snapping feels the same at any zoom level.
+   */
+  snapTime(timeSec, excludeId) {
+    const snapEnabled = document.getElementById('snapToGrid')?.checked !== false;
+    if (!snapEnabled) return timeSec;
+
+    const thresholdSec = 8 / this.zoomLevel; // 8 screen pixels
+    const candidates = [this.player.getCurrentTime(), 0];
+    this.subManager.getSubtitles().forEach(s => {
+      if (s.id === excludeId) return;
+      candidates.push(s.start, s.end);
+    });
+
+    let best = timeSec;
+    let bestDist = thresholdSec;
+    candidates.forEach(c => {
+      const dist = Math.abs(timeSec - c);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = c;
+      }
+    });
+    return best;
+  }
+
   handleClipDragMove(e) {
     if (!this.draggedClipInfo) return;
     const { id, mode, startX, initialStart, initialEnd, initialDuration } = this.draggedClipInfo;
     const deltaPx = e.clientX - startX;
     const deltaSec = deltaPx / this.zoomLevel;
 
-    const snapEnabled = document.getElementById('snapToGrid')?.checked !== false;
-    const playheadTime = this.player.video.currentTime || 0;
-
     let newStart = initialStart;
     let newEnd = initialEnd;
 
     if (mode === 'move') {
-      newStart = Math.max(0, initialStart + deltaSec);
-      // Snapping to playhead
-      if (snapEnabled && Math.abs(newStart - playheadTime) < 0.12) {
-        newStart = playheadTime;
-      }
+      newStart = Math.max(0, this.snapTime(initialStart + deltaSec, id));
       newEnd = newStart + initialDuration;
     } else if (mode === 'trim-left') {
-      newStart = Math.max(0, Math.min(initialEnd - 0.1, initialStart + deltaSec));
-      if (snapEnabled && Math.abs(newStart - playheadTime) < 0.12) {
-        newStart = playheadTime;
-      }
+      newStart = Math.max(0, Math.min(initialEnd - 0.1, this.snapTime(initialStart + deltaSec, id)));
+      newEnd = initialEnd;
     } else if (mode === 'trim-right') {
-      newEnd = Math.max(initialStart + 0.1, initialEnd + deltaSec);
-      if (snapEnabled && Math.abs(newEnd - playheadTime) < 0.12) {
-        newEnd = playheadTime;
-      }
+      newEnd = Math.max(initialStart + 0.1, this.snapTime(initialEnd + deltaSec, id));
+      newStart = initialStart;
     }
 
     this.subManager.updateSubtitle(id, { start: newStart, end: newEnd });
