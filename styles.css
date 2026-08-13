@@ -1451,3 +1451,53 @@ kbd {
   margin: -2px 0 10px 0;
 }
 .model-note.hidden { display: none; }
+
+/* ============================================================
+   Header fitting
+   ============================================================
+   The toolbar is a single 48px row with a lot in it. Keep the brand on one
+   line and let the button groups shrink rather than wrap onto a second row,
+   which would overflow the fixed header height. */
+
+.brand {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.brand-title {
+  white-space: nowrap;
+}
+
+.brand-badge {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.header-controls {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-end;
+  gap: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.file-actions,
+.export-group {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.header-controls .btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.timecode-display-box { flex-shrink: 0; }
+
+/* Below this width the labels are the first thing worth losing. */
+@media (max-width: 1500px) {
+  .header-controls { gap: 8px; }
+  .header-controls .btn { padding: 6px 9px; font-size: 11px; }
+}

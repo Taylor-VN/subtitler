@@ -1,5 +1,5 @@
 /**
- * Subtitler Main Application
+ * Taylor's Transcriber — Main Application
  * Premiere Pro Style Subtitling Tool Entry Point
  */
 
@@ -91,7 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupDemoPicture();
 
     const starterSubs = [
-      { start: 1.0, end: 4.5, text: "Welcome to Subtitler Pro!", speaker: "Host" },
+      { start: 1.0, end: 4.5, text: "Welcome to Taylor's Transcriber!", speaker: "Host" },
       { start: 5.0, end: 9.2, text: "Designed with Premiere Pro workflows in mind.", speaker: "Host" },
       { start: 10.0, end: 14.0, text: "Drag subtitles on the timeline or edit timestamps on the left.", speaker: "Editor" },
       { start: 14.8, end: 19.5, text: "Import your .prfpset preset files to customize style presets!", speaker: "Editor" },
@@ -1084,7 +1084,7 @@ document.addEventListener('DOMContentLoaded', () => {
         note.className = 'export-note err';
         note.textContent =
           'No transcription engine is installed. Run "pip install -r requirements.txt" '
-          + 'in the Subtitler Pro folder, then relaunch.';
+          + "in the Taylor's Transcriber folder, then relaunch.";
         startBtn.disabled = true;
         return;
       }
@@ -1386,15 +1386,30 @@ document.addEventListener('DOMContentLoaded', () => {
       dctx.fillStyle = grad;
       dctx.beginPath(); dctx.arc(cx, cy, radius, 0, Math.PI * 2); dctx.fill();
 
-      dctx.fillStyle = '#ffffff';
-      dctx.font = `bold ${Math.round(46 * s)}px sans-serif`;
       dctx.textAlign = 'center';
       dctx.textBaseline = 'middle';
-      dctx.fillText('SUBTITLER PRO DEMO', w / 2, h * 0.32);
 
-      dctx.font = `${Math.round(30 * s)}px "Roboto Mono", monospace`;
+      // Shrink to fit rather than run off the edge of a narrow frame — the
+      // 9:16 project is only 1080 wide but scales type up by height.
+      const fitFont = (text, startPx, makeFont, maxWidth) => {
+        let size = startPx;
+        dctx.font = makeFont(size);
+        while (size > 8 && dctx.measureText(text).width > maxWidth) {
+          size -= 1;
+          dctx.font = makeFont(size);
+        }
+      };
+      const maxW = w * 0.86;
+
+      const title = "TAYLOR'S TRANSCRIBER";
+      dctx.fillStyle = '#ffffff';
+      fitFont(title, Math.round(46 * s), (n) => `bold ${n}px sans-serif`, maxW);
+      dctx.fillText(title, w / 2, h * 0.32);
+
+      const sub = `${project.label}  •  ${w}×${h}  •  25 FPS`;
       dctx.fillStyle = '#8fa8c8';
-      dctx.fillText(`${project.label}  •  ${w}×${h}  •  25 FPS`, w / 2, h * 0.4);
+      fitFont(sub, Math.round(30 * s), (n) => `${n}px "Roboto Mono", monospace`, maxW);
+      dctx.fillText(sub, w / 2, h * 0.4);
     });
   }
 });

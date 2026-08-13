@@ -63,7 +63,7 @@ class SettingsController {
       document.getElementById('alignerRow').innerHTML = '';
       note.className = 'export-note warn';
       note.textContent =
-        'Launch Subtitler Pro with run_subtitler.sh (or "python3 app.py") to install and run models.';
+        `Launch Taylor's Transcriber with run_subtitler.sh (or "python3 app.py") to install and run models.`;
       return;
     }
 

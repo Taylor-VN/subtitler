@@ -1,4 +1,4 @@
-# Subtitler Pro
+# Taylor's Transcriber
 
 A Premiere Pro–style captions editor whose point of difference is the export:
 captions render straight to **Apple ProRes 4444 with a real alpha channel**, so

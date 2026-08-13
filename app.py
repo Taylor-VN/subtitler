@@ -271,7 +271,7 @@ if __name__ == '__main__':
     server_thread = threading.Thread(target=run_server, args=(port,), daemon=True)
     server_thread.start()
 
-    print(f"Launching Standalone Desktop Window for Subtitler Pro on port {port}...")
+    print(f"Launching Standalone Desktop Window for Taylor's Transcriber on port {port}...")
     if find_ffmpeg():
         print(f"ffmpeg found at {find_ffmpeg()} — ProRes 4444 alpha export enabled.")
     else:
@@ -292,7 +292,7 @@ if __name__ == '__main__':
 
     # Launch Native PyWebView Standalone Desktop Window
     webview.create_window(
-        title='Subtitler Pro — Premiere Captions Editor',
+        title="Taylor's Transcriber — Premiere Captions Editor",
         url=f'http://127.0.0.1:{port}',
         js_api=api,
         width=1400,

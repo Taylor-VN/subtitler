@@ -179,7 +179,7 @@ class TranscriptionController {
 
     if (!this.hasBackend()) {
       throw new Error(
-        'AI transcription needs the desktop backend. Launch Subtitler Pro with '
+        "AI transcription needs the desktop backend. Launch Taylor's Transcriber with "
         + 'run_subtitler.sh (or "python3 app.py") rather than opening index.html in a browser.'
       );
     }

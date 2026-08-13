@@ -1,5 +1,5 @@
 """
-Local AI transcription backend for Subtitler Pro.
+Local AI transcription backend for Taylor's Transcriber.
 
 Runs open-source speech models entirely on this machine — nothing is uploaded
 anywhere. Models come from the Hugging Face Hub (cached under ~/.cache/hugging-
@@ -254,7 +254,7 @@ class Transcriber:
                     return {'ok': False,
                             'error': (f'{model["label"]} needs the "{pkg}" runtime, which is not '
                                       f'installed.\n\nInstall it with:\n    pip install {pkg}\n\n'
-                                      'then relaunch Subtitler Pro.')}
+                                      'then relaunch Taylor\'s Transcriber.')}
                 if not registry.is_installed(model['repo']):
                     return {'ok': False,
                             'error': (f'{model["label"]} has not been downloaded yet. '
