@@ -198,6 +198,7 @@ class TranscriptionController {
       vad: opts.vad !== false,
       beam_size: opts.beamSize || 5,
       engine: opts.engine || 'auto',
+      align: opts.align === undefined ? 'auto' : opts.align,
     });
     if (!begun || !begun.ok) throw new Error((begun && begun.error) || 'Could not start transcription.');
     this.jobId = begun.job_id;

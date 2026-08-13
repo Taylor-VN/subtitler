@@ -1,40 +1,37 @@
 """
 Local AI transcription backend for Subtitler Pro.
 
-Runs an open-source Whisper model entirely on this machine — nothing is
-uploaded anywhere. Models come from the Hugging Face Hub (cached under
-~/.cache/huggingface after the first download) or from a local directory you
-point at.
+Runs open-source speech models entirely on this machine — nothing is uploaded
+anywhere. Models come from the Hugging Face Hub (cached under ~/.cache/hugging-
+face) or from a local directory you point at.
 
-Two engines are supported, tried in this order:
+Two ideas shape this module:
 
-  1. faster-whisper (CTranslate2) — the default. Several times faster than the
-     reference implementation on CPU, low memory, and it emits the word-level
-     timestamps this app needs to cut captions accurately.
-  2. transformers — fallback, so any Whisper-architecture checkpoint on the Hub
-     (including community fine-tunes) can be used.
+  1. Engine choice is platform-dependent. On Apple Silicon, CTranslate2
+     (faster-whisper) has no Metal backend and runs on CPU cores only, so the
+     MLX engines — which use the GPU — are preferred there. See engines.py.
 
-Audio arrives from the front-end already decoded to 16 kHz mono WAV, which is
-exactly what Whisper wants, so no ffmpeg is required for transcription.
+  2. Recognition and timing are separate passes. The most accurate models
+     available are LLM-backbone designs that return text with no usable word
+     times. Rather than excluding them, a CTC forced-alignment pass attaches
+     precise per-word times to whatever transcript comes back. That also
+     tightens Whisper's own timings, which are inferred from cross-attention
+     and drift noticeably.
+
+Audio arrives from the front-end already decoded to 16 kHz mono WAV, so no
+ffmpeg is needed for transcription.
 """
 
 import os
 import base64
+import shutil
 import tempfile
 import threading
 import traceback
 import uuid
 
-# Whisper's own size presets. faster-whisper resolves the bare names to the
-# corresponding Systran/faster-whisper-* repository on the Hub.
-MODEL_PRESETS = {
-    'tiny':           {'id': 'tiny',              'label': 'Tiny — fastest, roughly 75 MB',        'params': '39M'},
-    'base':           {'id': 'base',              'label': 'Base — fast, roughly 145 MB',          'params': '74M'},
-    'small':          {'id': 'small',             'label': 'Small — balanced, roughly 480 MB',     'params': '244M'},
-    'medium':         {'id': 'medium',            'label': 'Medium — accurate, roughly 1.5 GB',    'params': '769M'},
-    'large-v3':       {'id': 'large-v3',          'label': 'Large v3 — best quality, roughly 3 GB', 'params': '1550M'},
-    'distil-large-v3': {'id': 'distil-large-v3',  'label': 'Distil Large v3 — near-large quality, about 2x faster', 'params': '756M'},
-}
+import model_registry as registry
+import engines as engines_mod
 
 TERMINAL_STATES = ('done', 'error', 'cancelled')
 
@@ -43,7 +40,7 @@ class TranscriptionJob:
     def __init__(self, job_id, options):
         self.id = job_id
         self.options = options or {}
-        self.state = 'receiving'      # receiving -> loading -> transcribing -> done
+        self.state = 'receiving'      # receiving -> loading -> transcribing -> aligning -> done
         self.progress = 0.0
         self.message = 'Waiting for audio…'
         self.error = None
@@ -67,84 +64,202 @@ class TranscriptionJob:
         }
 
 
+class InstallJob:
+    def __init__(self, job_id, model_id, repo):
+        self.id = job_id
+        self.model_id = model_id
+        self.repo = repo
+        self.state = 'downloading'
+        self.progress = 0.0
+        self.message = 'Starting download…'
+        self.error = None
+        self.cancelled = False
+        self.downloaded = 0
+        self.total = 0
+
+    def snapshot(self):
+        return {
+            'ok': True, 'job_id': self.id, 'model_id': self.model_id,
+            'state': self.state, 'progress': round(self.progress, 4),
+            'message': self.message, 'error': self.error,
+            'downloaded': self.downloaded, 'total': self.total,
+        }
+
+
 class Transcriber:
     def __init__(self):
         self.jobs = {}
+        self.installs = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Capability probing
     # ------------------------------------------------------------------
     def probe(self):
-        """Report which engines are installed, and what hardware is available."""
-        engines = []
-        try:
-            import faster_whisper  # noqa: F401
-            engines.append('faster-whisper')
-        except Exception:
-            pass
-        try:
-            import transformers  # noqa: F401
-            engines.append('transformers')
-        except Exception:
-            pass
+        available_engines = [e for e in registry.ENGINE_LABELS if registry.engine_available(e)]
 
-        device = 'cpu'
-        device_name = 'CPU'
+        device, device_name = 'cpu', 'CPU'
+        if registry.is_apple_silicon():
+            device, device_name = 'mps', 'Apple Silicon GPU'
         try:
             import torch
             if torch.cuda.is_available():
-                device = 'cuda'
-                device_name = torch.cuda.get_device_name(0)
-            elif getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():
-                device = 'mps'
-                device_name = 'Apple Silicon GPU (MPS)'
+                device, device_name = 'cuda', torch.cuda.get_device_name(0)
         except Exception:
             pass
+
+        models = registry.list_models()
+        installed = [m for m in models if m['installed']]
+        aligner_installed = registry.is_installed(registry.ALIGNER_MODEL['repo'])
 
         return {
             'ok': True,
-            'available': len(engines) > 0,
-            'engines': engines,
+            'available': len(available_engines) > 0,
+            'engines': available_engines,
+            'engine_labels': registry.ENGINE_LABELS,
             'device': device,
             'device_name': device_name,
-            'presets': MODEL_PRESETS,
-            'cached_models': self.list_cached_models(),
-            'install_hint': 'pip install -r requirements.txt',
+            'apple_silicon': registry.is_apple_silicon(),
+            'models': models,
+            'installed_count': len(installed),
+            'aligner': dict(registry.ALIGNER_MODEL,
+                            installed=aligner_installed,
+                            available=engines_mod.ForcedAligner().available()),
+            'recommended': registry.recommended('accuracy'),
+            'free_disk': registry.free_disk_bytes(),
+            'cache_dir': registry.hf_cache_dir(),
         }
 
-    def list_cached_models(self):
-        """Models already downloaded, so the UI can show what runs offline."""
-        found = []
-        try:
-            from huggingface_hub import scan_cache_dir
-            cache = scan_cache_dir()
-            for repo in cache.repos:
-                name = repo.repo_id
-                if 'whisper' in name.lower():
-                    found.append({
-                        'id': name,
-                        'size_on_disk': repo.size_on_disk,
-                        'path': str(repo.repo_path),
-                    })
-        except Exception:
-            pass
-        return found
+    def list_models(self):
+        return {'ok': True, 'models': registry.list_models(),
+                'aligner': dict(registry.ALIGNER_MODEL,
+                                installed=registry.is_installed(registry.ALIGNER_MODEL['repo']))}
 
     # ------------------------------------------------------------------
-    # Audio upload — the page streams 16 kHz mono WAV over in chunks
+    # Model install / removal
+    # ------------------------------------------------------------------
+    def install_model(self, model_id):
+        """Download a model in the background; poll with install_status()."""
+        try:
+            if model_id == registry.ALIGNER_MODEL['id']:
+                repo, label = registry.ALIGNER_MODEL['repo'], registry.ALIGNER_MODEL['label']
+            else:
+                model = registry.get(model_id)
+                if not model:
+                    return {'ok': False, 'error': f'Unknown model "{model_id}".'}
+                repo, label = model['repo'], model['label']
+
+            try:
+                import huggingface_hub  # noqa: F401
+            except ImportError:
+                return {'ok': False,
+                        'error': 'huggingface-hub is not installed. Run: pip install huggingface-hub'}
+
+            job_id = uuid.uuid4().hex
+            job = InstallJob(job_id, model_id, repo)
+            job.message = f'Downloading {label}…'
+            with self._lock:
+                self.installs[job_id] = job
+
+            t = threading.Thread(target=self._run_install, args=(job,), daemon=True)
+            t.start()
+            return {'ok': True, 'job_id': job_id}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+
+    def _run_install(self, job):
+        try:
+            from huggingface_hub import snapshot_download
+            from tqdm.auto import tqdm as base_tqdm
+
+            outer = job
+
+            class ProgressTqdm(base_tqdm):
+                """Feeds hub download progress back to the polling UI."""
+                def update(self, n=1):
+                    result = super().update(n)
+                    try:
+                        if self.total:
+                            outer.total = max(outer.total, int(self.total))
+                            outer.downloaded = int(self.n)
+                            outer.progress = min(0.99, float(self.n) / float(self.total))
+                            mb = outer.downloaded / (1024 * 1024)
+                            total_mb = outer.total / (1024 * 1024)
+                            outer.message = f'Downloading… {mb:.0f} / {total_mb:.0f} MB'
+                    except Exception:
+                        pass
+                    return result
+
+            snapshot_download(repo_id=job.repo, tqdm_class=ProgressTqdm)
+
+            if job.cancelled:
+                job.state = 'cancelled'
+                job.message = 'Cancelled.'
+                return
+            job.progress = 1.0
+            job.state = 'done'
+            job.message = 'Installed.'
+        except Exception as e:
+            job.state = 'error'
+            job.error = str(e)
+            job.message = f'Download failed: {e}'
+
+    def install_status(self, job_id):
+        job = self.installs.get(job_id)
+        if not job:
+            return {'ok': False, 'error': 'Unknown install job.'}
+        return job.snapshot()
+
+    def cancel_install(self, job_id):
+        job = self.installs.get(job_id)
+        if not job:
+            return {'ok': False, 'error': 'Unknown install job.'}
+        job.cancelled = True
+        return {'ok': True}
+
+    def remove_model(self, model_id):
+        try:
+            if model_id == registry.ALIGNER_MODEL['id']:
+                repo = registry.ALIGNER_MODEL['repo']
+            else:
+                model = registry.get(model_id)
+                if not model:
+                    return {'ok': False, 'error': f'Unknown model "{model_id}".'}
+                repo = model['repo']
+
+            path = registry.repo_cache_path(repo)
+            if not path or not os.path.isdir(path):
+                return {'ok': False, 'error': 'That model is not installed.'}
+            freed = registry.dir_size_bytes(path)
+            shutil.rmtree(path, ignore_errors=True)
+            return {'ok': True, 'freed': freed}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+
+    # ------------------------------------------------------------------
+    # Audio upload
     # ------------------------------------------------------------------
     def begin(self, options):
         try:
-            probe = self.probe()
-            if not probe['available']:
-                return {
-                    'ok': False,
-                    'error': ('No transcription engine is installed.\n\n'
-                              'Install one with:\n'
-                              '    pip install -r requirements.txt\n\n'
-                              'then relaunch Subtitler Pro.')
-                }
+            options = options or {}
+            model_id = options.get('model')
+            custom = (options.get('custom_model') or '').strip()
+
+            if not custom:
+                model = registry.get(model_id)
+                if not model:
+                    return {'ok': False, 'error': f'Unknown model "{model_id}".'}
+                if not registry.engine_available(model['engine']):
+                    pkg = registry.ENGINE_PACKAGES.get(model['engine'], model['engine'])
+                    return {'ok': False,
+                            'error': (f'{model["label"]} needs the "{pkg}" runtime, which is not '
+                                      f'installed.\n\nInstall it with:\n    pip install {pkg}\n\n'
+                                      'then relaunch Subtitler Pro.')}
+                if not registry.is_installed(model['repo']):
+                    return {'ok': False,
+                            'error': (f'{model["label"]} has not been downloaded yet. '
+                                      'Open Settings and install it first.'),
+                            'needs_install': model_id}
 
             job_id = uuid.uuid4().hex
             job = TranscriptionJob(job_id, options)
@@ -174,7 +289,6 @@ class Transcriber:
             return {'ok': False, 'error': str(e)}
 
     def finish_audio_and_run(self, job_id):
-        """Close the WAV and kick the model off on a worker thread."""
         try:
             job = self.jobs.get(job_id)
             if not job:
@@ -234,182 +348,100 @@ class Transcriber:
     def _run_job(self, job):
         try:
             opts = job.options
-            model_ref = self._resolve_model_ref(opts)
+            custom = (opts.get('custom_model') or '').strip()
 
-            engine = opts.get('engine') or 'auto'
-            if engine in ('auto', 'faster-whisper'):
-                try:
-                    import faster_whisper  # noqa: F401
-                    self._run_faster_whisper(job, model_ref)
-                    return
-                except ImportError:
-                    if engine == 'faster-whisper':
-                        raise RuntimeError('faster-whisper is not installed.')
-            self._run_transformers(job, model_ref)
+            if custom:
+                # An arbitrary repo/folder: assume Whisper-shaped, pick whatever
+                # runtime this machine actually has.
+                model_desc = dict(registry.MODELS['whisper-large-v3'])
+                model_desc['repo'] = custom
+                model_desc['label'] = custom
+                if not registry.engine_available(model_desc['engine']):
+                    for eng in (registry.ENGINE_TRANSFORMERS, registry.ENGINE_FASTER_WHISPER):
+                        if registry.engine_available(eng):
+                            model_desc['engine'] = eng
+                            break
+            else:
+                model_desc = dict(registry.get(opts.get('model')))
+
+            # Guard the English-only trap rather than returning silent nonsense.
+            lang = opts.get('language')
+            if model_desc.get('english_only') and lang not in (None, '', 'auto', 'en'):
+                raise RuntimeError(
+                    f'{model_desc["label"]} is an English-only model, but "{lang}" was requested. '
+                    'Choose a multilingual model, or set the language to English.')
+
+            def report(frac, message):
+                if job.cancelled:
+                    raise _Cancelled()
+                job.progress = max(0.0, min(0.99, frac))
+                job.message = message
+
+            engine = engines_mod.build_engine(model_desc, opts)
+            job.state = 'loading'
+            engine.load(progress_cb=report)
+
+            if job.cancelled:
+                raise _Cancelled()
+
+            job.state = 'transcribing'
+            job.message = 'Transcribing…'
+            raw = engine.transcribe(job.audio_path, opts, progress_cb=report)
+
+            if job.cancelled:
+                raise _Cancelled()
+
+            words = raw.get('words') or []
+            text = (raw.get('text') or ' '.join(s['text'] for s in raw.get('segments', []))).strip()
+            alignment_used = False
+
+            wants_alignment = opts.get('align', 'auto')
+            should_align = (
+                wants_alignment is True
+                or (wants_alignment == 'auto' and (not words or model_desc.get('needs_alignment')))
+            )
+
+            if should_align and text:
+                job.state = 'aligning'
+                job.message = 'Aligning word timings…'
+                aligner = engines_mod.ForcedAligner()
+                aligned = aligner.align(job.audio_path, text,
+                                        language=raw.get('language'), progress_cb=report)
+                if aligned:
+                    words = aligned
+                    alignment_used = True
+                elif not words:
+                    raise RuntimeError(
+                        'This model reports no word timings, and forced alignment is unavailable. '
+                        'Install the aligner from Settings (needs torch + torchaudio), or pick a '
+                        'model that provides its own timings, such as Whisper or Parakeet.')
+
+            segments = raw.get('segments') or []
+            if words and not any(s.get('words') for s in segments):
+                segments = [{'start': words[0]['start'], 'end': words[-1]['end'],
+                             'text': text, 'words': words}]
+
+            job.progress = 1.0
+            job.state = 'done'
+            job.message = f'Transcribed {len(words)} words.'
+            job.result = {
+                'segments': segments,
+                'words': words,
+                'language': raw.get('language'),
+                'text': text,
+                'engine': model_desc['engine'],
+                'model': model_desc.get('label') or model_desc['repo'],
+                'alignment_used': alignment_used,
+            }
+        except _Cancelled:
+            job.state = 'cancelled'
+            job.message = 'Cancelled.'
         except Exception as e:
             job.state = 'error'
-            job.error = f'{e}\n\n{traceback.format_exc(limit=3)}'
+            job.error = f'{e}'
             job.message = str(e)
+            job.trace = traceback.format_exc(limit=3)
 
-    def _resolve_model_ref(self, opts):
-        """A size preset, an arbitrary HF repo id, or a local directory."""
-        custom = (opts.get('custom_model') or '').strip()
-        if custom:
-            expanded = os.path.expanduser(custom)
-            if os.path.isdir(expanded):
-                return expanded
-            return custom
-        preset = opts.get('model') or 'small'
-        return MODEL_PRESETS.get(preset, {}).get('id', preset)
 
-    def _pick_device(self, opts):
-        requested = opts.get('device') or 'auto'
-        if requested != 'auto':
-            return requested
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return 'cuda'
-        except Exception:
-            pass
-        return 'cpu'
-
-    def _run_faster_whisper(self, job, model_ref):
-        from faster_whisper import WhisperModel
-
-        opts = job.options
-        device = self._pick_device(opts)
-        # int8 keeps CPU inference fast and memory small; fp16 suits a GPU.
-        compute_type = opts.get('compute_type') or ('float16' if device == 'cuda' else 'int8')
-
-        job.state = 'loading'
-        job.message = f'Loading "{model_ref}" on {device.upper()}… (first run downloads the model)'
-        model = WhisperModel(model_ref, device=device, compute_type=compute_type)
-
-        if job.cancelled:
-            job.state = 'cancelled'
-            return
-
-        language = opts.get('language') or None
-        if language in ('auto', ''):
-            language = None
-
-        job.state = 'transcribing'
-        job.message = 'Transcribing…'
-
-        segments_iter, info = model.transcribe(
-            job.audio_path,
-            language=language,
-            task=opts.get('task') or 'transcribe',
-            word_timestamps=True,
-            vad_filter=bool(opts.get('vad', True)),
-            beam_size=int(opts.get('beam_size', 5)),
-            condition_on_previous_text=False,
-        )
-
-        total = float(getattr(info, 'duration', 0) or 0)
-        detected = getattr(info, 'language', None)
-        out_segments = []
-
-        for seg in segments_iter:
-            if job.cancelled:
-                job.state = 'cancelled'
-                job.message = 'Cancelled.'
-                return
-            words = []
-            for w in (getattr(seg, 'words', None) or []):
-                words.append({
-                    'word': w.word,
-                    'start': float(w.start),
-                    'end': float(w.end),
-                    'probability': float(getattr(w, 'probability', 1.0) or 1.0),
-                })
-            out_segments.append({
-                'start': float(seg.start),
-                'end': float(seg.end),
-                'text': seg.text.strip(),
-                'words': words,
-            })
-            if total > 0:
-                job.progress = min(0.99, float(seg.end) / total)
-                job.message = f'Transcribing… {int(job.progress * 100)}%'
-
-        job.progress = 1.0
-        job.state = 'done'
-        job.message = f'Transcribed {len(out_segments)} segments.'
-        job.result = {
-            'segments': out_segments,
-            'language': detected,
-            'duration': total,
-            'engine': 'faster-whisper',
-            'model': model_ref,
-            'device': device,
-        }
-
-    def _run_transformers(self, job, model_ref):
-        from transformers import pipeline
-
-        opts = job.options
-        device = self._pick_device(opts)
-
-        job.state = 'loading'
-        job.message = f'Loading "{model_ref}" with transformers on {device.upper()}…'
-
-        device_arg = 0 if device == 'cuda' else -1
-        asr = pipeline(
-            'automatic-speech-recognition',
-            model=model_ref,
-            device=device_arg,
-            chunk_length_s=30,
-        )
-
-        if job.cancelled:
-            job.state = 'cancelled'
-            return
-
-        job.state = 'transcribing'
-        job.message = 'Transcribing…'
-        job.progress = 0.05
-
-        generate_kwargs = {}
-        language = opts.get('language')
-        if language and language not in ('auto', ''):
-            generate_kwargs['language'] = language
-        if opts.get('task'):
-            generate_kwargs['task'] = opts['task']
-
-        raw = asr(job.audio_path, return_timestamps='word', generate_kwargs=generate_kwargs or None)
-
-        words = []
-        for chunk in (raw.get('chunks') or []):
-            ts = chunk.get('timestamp') or (None, None)
-            start, end = ts[0], ts[1]
-            if start is None:
-                continue
-            if end is None:
-                end = start + 0.2
-            words.append({
-                'word': chunk.get('text', ''),
-                'start': float(start),
-                'end': float(end),
-                'probability': 1.0,
-            })
-
-        segments = [{
-            'start': words[0]['start'] if words else 0.0,
-            'end': words[-1]['end'] if words else 0.0,
-            'text': (raw.get('text') or '').strip(),
-            'words': words,
-        }] if words else []
-
-        job.progress = 1.0
-        job.state = 'done'
-        job.message = f'Transcribed {len(words)} words.'
-        job.result = {
-            'segments': segments,
-            'language': opts.get('language') or None,
-            'duration': words[-1]['end'] if words else 0.0,
-            'engine': 'transformers',
-            'model': model_ref,
-            'device': device,
-        }
+class _Cancelled(Exception):
+    pass

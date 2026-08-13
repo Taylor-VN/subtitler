@@ -61,6 +61,9 @@
         <button id="btnExportVtt" class="btn btn-secondary" title="Export as WebVTT">Export VTT</button>
         <button id="btnExportXml" class="btn btn-secondary" title="Export Premiere Pro Sequence XML">Export Premiere XML</button>
         <button id="btnExportPreset" class="btn btn-outline" title="Export Style Preset">Export Preset</button>
+        <button id="btnSettings" class="btn btn-icon-only" title="Settings — models &amp; transcription engines">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
         <button id="btnShortcuts" class="btn btn-icon-only" title="Keyboard Shortcuts (?)">?</button>
       </div>
     </div>
@@ -425,7 +428,8 @@
         <div class="shortcut-row"><kbd>M</kbd> <span>Toggle Audio Mute</span></div>
         <div class="shortcut-row"><kbd>G</kbd> <span>Toggle Title / Action Safe Guides</span></div>
         <div class="shortcut-row"><kbd>E</kbd> <span>Open ProRes 4444 + Alpha Export</span></div>
-        <div class="shortcut-row"><kbd>T</kbd> <span>Auto-Transcribe with a Local Whisper Model</span></div>
+        <div class="shortcut-row"><kbd>T</kbd> <span>Auto-Transcribe with a Local AI Model</span></div>
+        <div class="shortcut-row"><kbd>,</kbd> <span>Settings — Manage Transcription Models</span></div>
         <div class="shortcut-row"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <span>Aspect Ratio: 16:9 / 1:1 / 4:5 / 9:16</span></div>
         <div class="shortcut-row"><kbd>+</kbd> / <kbd>-</kbd> <span>Zoom Timeline In / Out</span></div>
       </div>
@@ -491,6 +495,51 @@
     </div>
   </div>
 
+  <!-- Settings / Model Manager Modal -->
+  <div id="settingsModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-card-wide">
+      <div class="modal-header">
+        <h3>Settings — Transcription Models</h3>
+        <button id="btnCloseSettings" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="settingsSystemInfo" class="system-info">Checking system…</div>
+
+        <div class="settings-section">
+          <div class="settings-section-head">
+            <label class="group-label">Word Timing Aligner</label>
+          </div>
+          <p class="modal-hint tight">
+            Attaches precise per-word times to the transcript. The most accurate
+            models return text with no timings at all, and Whisper's own timings
+            are inferred rather than measured — this pass pins each word to the
+            audio, which is what caption timing depends on.
+          </p>
+          <div id="alignerRow" class="model-row"></div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-head">
+            <label class="group-label">Speech Models</label>
+            <div class="model-filter-btns">
+              <button class="model-filter active" data-tier="all">All</button>
+              <button class="model-filter" data-tier="accuracy">Most accurate</button>
+              <button class="model-filter" data-tier="balanced">Balanced</button>
+              <button class="model-filter" data-tier="fast">Fastest</button>
+            </div>
+          </div>
+          <div id="modelList" class="model-list">Loading models…</div>
+        </div>
+
+        <div id="settingsNote" class="export-note"></div>
+      </div>
+      <div class="modal-footer">
+        <span id="settingsDiskInfo" class="disk-info"></span>
+        <button id="btnCloseSettingsFooter" class="btn btn-outline">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- AI Transcription Modal -->
   <div id="transcribeModal" class="modal-backdrop hidden">
     <div class="modal-card">
@@ -513,15 +562,11 @@
         <div class="export-row">
           <label class="export-lbl" for="transcribeModelSelect">Model</label>
           <select id="transcribeModelSelect" class="input-select">
-            <option value="tiny">Tiny — fastest, ~75 MB</option>
-            <option value="base">Base — fast, ~145 MB</option>
-            <option value="small" selected>Small — balanced, ~480 MB</option>
-            <option value="medium">Medium — accurate, ~1.5 GB</option>
-            <option value="large-v3">Large v3 — best quality, ~3 GB</option>
-            <option value="distil-large-v3">Distil Large v3 — near-large, ~2× faster</option>
-            <option value="__custom__">Custom Hugging Face model / local folder…</option>
+            <option value="">Loading models…</option>
           </select>
         </div>
+
+        <div id="transcribeModelNote" class="model-note hidden"></div>
 
         <div class="export-row hidden" id="customModelRow">
           <label class="export-lbl" for="transcribeCustomModel">Model ID</label>
@@ -549,6 +594,15 @@
             <option value="ko">Korean</option>
             <option value="zh">Chinese</option>
             <option value="vi">Vietnamese</option>
+          </select>
+        </div>
+
+        <div class="export-row">
+          <label class="export-lbl" for="transcribeAlign">Word timing</label>
+          <select id="transcribeAlign" class="input-select">
+            <option value="auto" selected>Automatic — align when the model needs it</option>
+            <option value="always">Always force-align (most precise)</option>
+            <option value="never">Use the model's own timings only</option>
           </select>
         </div>
 
@@ -608,6 +662,7 @@
   <script src="js/exporter.js"></script>
   <script src="js/captionSegmenter.js"></script>
   <script src="js/transcription.js"></script>
+  <script src="js/settings.js"></script>
   <script src="js/timeline.js"></script>
   <script src="js/app.js"></script>
 </body>

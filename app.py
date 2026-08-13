@@ -112,6 +112,22 @@ class ExportApi:
     def transcribe_cleanup(self, job_id):
         return self.transcriber.cleanup(job_id)
 
+    # --- model management -------------------------------------------------
+    def models_list(self):
+        return self.transcriber.list_models()
+
+    def model_install(self, model_id):
+        return self.transcriber.install_model(model_id)
+
+    def model_install_status(self, job_id):
+        return self.transcriber.install_status(job_id)
+
+    def model_install_cancel(self, job_id):
+        return self.transcriber.cancel_install(job_id)
+
+    def model_remove(self, model_id):
+        return self.transcriber.remove_model(model_id)
+
     # --- export lifecycle -------------------------------------------------
     def begin_export(self, meta):
         try:
@@ -266,6 +282,11 @@ if __name__ == '__main__':
     _probe = api.transcribe_probe()
     if _probe.get('available'):
         print(f"AI transcription ready via {', '.join(_probe['engines'])} on {_probe['device_name']}.")
+        print(f"{_probe['installed_count']} model(s) installed. Manage them in Settings.")
+        if _probe.get('apple_silicon') and 'faster-whisper' in _probe['engines'] \
+                and not any(e.startswith('mlx') or 'parakeet' in e for e in _probe['engines']):
+            print("Note: faster-whisper runs CPU-only on Apple Silicon. "
+                  "Install mlx-whisper or parakeet-mlx to use the GPU.")
     else:
         print("AI transcription unavailable — run 'pip install -r requirements.txt' to enable it.")
 
