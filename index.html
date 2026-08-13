@@ -48,6 +48,10 @@
       </div>
 
       <div class="export-group">
+        <button id="btnExportAlpha" class="btn btn-prores" title="Render captions to Apple ProRes 4444 with alpha (E)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 10l4.553-2.276A1 1 0 0 1 21 8.618v6.764a1 1 0 0 1-1.447.894L15 14v-4z"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg>
+          Export ProRes + Alpha
+        </button>
         <button id="btnExportSrt" class="btn btn-primary" title="Export as SubRip SRT">Export SRT</button>
         <button id="btnExportVtt" class="btn btn-secondary" title="Export as WebVTT">Export VTT</button>
         <button id="btnExportXml" class="btn btn-secondary" title="Export Premiere Pro Sequence XML">Export Premiere XML</button>
@@ -91,15 +95,35 @@
     <section class="panel panel-center" id="panelPreview">
       <div class="panel-header">
         <div class="panel-title">Program Monitor</div>
+        <div class="aspect-ratio-bar" role="group" aria-label="Project aspect ratio">
+          <span class="aspect-label">Aspect:</span>
+          <button class="aspect-btn active" data-aspect="16x9" title="16:9 Landscape — 1920×1080">16:9</button>
+          <button class="aspect-btn" data-aspect="1x1" title="1:1 Square — 1080×1080">1:1</button>
+          <button class="aspect-btn" data-aspect="4x5" title="4:5 Portrait — 1080×1350">4:5</button>
+          <button class="aspect-btn" data-aspect="9x16" title="9:16 Vertical — 1080×1920">9:16</button>
+          <span id="projectResLabel" class="project-res">1920×1080</span>
+        </div>
         <div class="panel-info" id="mediaInfoLabel">Sample Video Demo</div>
       </div>
 
       <div class="viewport-container" id="viewportContainer">
-        <!-- Video Element -->
-        <video id="videoPlayer" playsinline preload="auto"></video>
+        <!-- Program frame: locked to the project aspect ratio -->
+        <div class="program-frame" id="programFrame">
+          <!-- Built-in demo picture (replaced as soon as real media is loaded) -->
+          <canvas id="demoCanvas"></canvas>
 
-        <!-- Subtitle Overlay Canvas -->
-        <canvas id="subtitleCanvas"></canvas>
+          <!-- Video Element -->
+          <video id="videoPlayer" playsinline preload="auto"></video>
+
+          <!-- Subtitle Overlay Canvas (backing store == project resolution) -->
+          <canvas id="subtitleCanvas"></canvas>
+
+          <!-- Title/action safe guides -->
+          <div class="safe-guides hidden" id="safeGuides">
+            <div class="safe-action"></div>
+            <div class="safe-title"></div>
+          </div>
+        </div>
 
         <!-- Video Dropzone Overlay -->
         <div id="dropzoneOverlay" class="dropzone-overlay hidden">
@@ -148,6 +172,9 @@
               <option value="2.0">2.0x</option>
             </select>
           </label>
+          <button id="btnSafeGuides" class="btn-transport" title="Toggle Title / Action Safe Guides (G)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="7" y="8" width="10" height="8" rx="1" stroke-dasharray="3 2"/></svg>
+          </button>
           <button id="btnFullscreen" class="btn-transport" title="Toggle Fullscreen Program Monitor (F)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
           </button>
@@ -391,6 +418,69 @@
         <div class="shortcut-row"><kbd>R</kbd> <span>Toggle Subtitle Loop Region</span></div>
         <div class="shortcut-row"><kbd>F</kbd> <span>Toggle Fullscreen Program Monitor</span></div>
         <div class="shortcut-row"><kbd>M</kbd> <span>Toggle Audio Mute</span></div>
+        <div class="shortcut-row"><kbd>G</kbd> <span>Toggle Title / Action Safe Guides</span></div>
+        <div class="shortcut-row"><kbd>E</kbd> <span>Open ProRes 4444 + Alpha Export</span></div>
+        <div class="shortcut-row"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <span>Aspect Ratio: 16:9 / 1:1 / 4:5 / 9:16</span></div>
+        <div class="shortcut-row"><kbd>+</kbd> / <kbd>-</kbd> <span>Zoom Timeline In / Out</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Alpha / ProRes Export Modal -->
+  <div id="exportModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Export Captions — ProRes 4444 + Alpha</h3>
+        <button id="btnCloseExportModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-hint">
+          Renders the captions only, on a fully transparent background, at the
+          project resolution. Drop the result on a track above your footage in
+          Premiere Pro — the alpha channel is read automatically.
+        </p>
+
+        <div class="export-row">
+          <span class="export-lbl">Resolution</span>
+          <span id="exportResInfo" class="export-val">1920 × 1080 (16:9 Landscape)</span>
+        </div>
+
+        <div class="export-row">
+          <span class="export-lbl">Frame rate</span>
+          <span class="export-val">25 fps</span>
+        </div>
+
+        <div class="export-row">
+          <label class="export-lbl" for="exportRangeSelect">Range</label>
+          <select id="exportRangeSelect" class="input-select">
+            <option value="captions">Captions only (trimmed to first → last caption)</option>
+            <option value="full">Full timeline duration</option>
+          </select>
+        </div>
+
+        <div class="export-row">
+          <label class="export-lbl" for="exportProfileSelect">Codec</label>
+          <select id="exportProfileSelect" class="input-select">
+            <option value="4">Apple ProRes 4444 (alpha)</option>
+            <option value="5">Apple ProRes 4444 XQ (alpha)</option>
+          </select>
+        </div>
+
+        <div class="export-row">
+          <span class="export-lbl">Frames</span>
+          <span id="exportFrameEstimate" class="export-val">—</span>
+        </div>
+
+        <div id="exportBackendNote" class="export-note"></div>
+
+        <div id="exportProgressWrap" class="export-progress hidden">
+          <div class="progress-track"><div id="exportProgressBar" class="progress-fill"></div></div>
+          <div id="exportProgressText" class="progress-text">Preparing…</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btnCancelExport" class="btn btn-outline">Cancel</button>
+        <button id="btnStartExport" class="btn btn-prores">Render Export</button>
       </div>
     </div>
   </div>
@@ -398,6 +488,7 @@
   <script src="js/presetParser.js"></script>
   <script src="js/subtitleManager.js"></script>
   <script src="js/videoPlayer.js"></script>
+  <script src="js/exporter.js"></script>
   <script src="js/timeline.js"></script>
   <script src="js/app.js"></script>
 </body>

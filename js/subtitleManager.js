@@ -90,17 +90,23 @@ class SubtitleManager {
     return newSub;
   }
 
-  updateSubtitle(id, updates) {
+  /**
+   * @param {Object} opts  { silent: true } updates the model without firing a
+   *   re-render — used while typing in the caption box so the textarea is not
+   *   torn down and rebuilt on every keystroke.
+   */
+  updateSubtitle(id, updates, opts = {}) {
     const sub = this.subtitles.find(s => s.id === id);
-    if (!sub) return;
-    
-    if (updates.start !== undefined) sub.start = Math.max(0, updates.start);
-    if (updates.end !== undefined) sub.end = Math.max(sub.start + 0.1, updates.end);
+    if (!sub) return false;
+
+    if (updates.start !== undefined && !isNaN(updates.start)) sub.start = Math.max(0, updates.start);
+    if (updates.end !== undefined && !isNaN(updates.end)) sub.end = Math.max(sub.start + 0.1, updates.end);
     if (updates.text !== undefined) sub.text = updates.text;
     if (updates.speaker !== undefined) sub.speaker = updates.speaker;
 
     this.subtitles.sort((a, b) => a.start - b.start);
-    this.notify();
+    if (!opts.silent) this.notify();
+    return true;
   }
 
   deleteSubtitle(id) {
@@ -110,8 +116,12 @@ class SubtitleManager {
   }
 
   selectSubtitle(id) {
+    // Re-selecting the same line must not fire a change: listeners re-render the
+    // list, and a re-render that restores focus would call back in here forever.
+    if (this.selectedId === id) return false;
     this.selectedId = id;
     this.notify();
+    return true;
   }
 
   getActiveSubtitleAt(timeSec) {
@@ -120,7 +130,7 @@ class SubtitleManager {
 
   splitSubtitleAt(id, timeSec) {
     const sub = this.subtitles.find(s => s.id === id);
-    if (!sub || timeSec <= sub.start || timeSec >= sub.end) return;
+    if (!sub || timeSec <= sub.start || timeSec >= sub.end) return false;
 
     const originalEnd = sub.end;
     const words = sub.text.trim().split(/\s+/);
@@ -131,12 +141,13 @@ class SubtitleManager {
     sub.end = timeSec;
     sub.text = text1;
 
-    this.addSubtitle(timeSec + 0.04, originalEnd, text2, sub.speaker);
+    this.addSubtitle(timeSec + (1 / this.fps), originalEnd, text2, sub.speaker);
+    return true;
   }
 
   mergeSubtitle(id) {
     const idx = this.subtitles.findIndex(s => s.id === id);
-    if (idx === -1 || idx >= this.subtitles.length - 1) return;
+    if (idx === -1 || idx >= this.subtitles.length - 1) return false;
 
     const currentSub = this.subtitles[idx];
     const nextSub = this.subtitles[idx + 1];
@@ -146,6 +157,7 @@ class SubtitleManager {
 
     this.subtitles.splice(idx + 1, 1);
     this.notify();
+    return true;
   }
 
   rippleDeleteSubtitle(id) {
@@ -181,32 +193,59 @@ class SubtitleManager {
     this.notify();
   }
 
-  // --- Premiere Pro Sequence XML Export ---
-  exportPremiereXml() {
+  // --- Premiere Pro Sequence XML (FCP7 xmeml) Export ---
+  /**
+   * Emits a well-formed xmeml v4 sequence. Note this uses <clipitem>, the
+   * element Premiere actually reads — <trackitem> is not part of the schema and
+   * imports as an empty sequence.
+   */
+  exportPremiereXml(project = { width: 1920, height: 1080 }) {
     const fps = this.fps;
+    const esc = (s) => String(s || '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+    const lastEnd = this.subtitles.length
+      ? Math.max(...this.subtitles.map(s => s.end))
+      : 0;
+    const sequenceDuration = Math.max(1, Math.ceil(lastEnd * fps));
+
+    const rate = `<rate><timebase>${fps}</timebase><ntsc>FALSE</ntsc></rate>`;
+
     const clipNodes = this.subtitles.map((sub, i) => {
-      const inFrame = Math.floor(sub.start * fps);
-      const outFrame = Math.floor(sub.end * fps);
-      return `      <trackitem id="title_item_${i + 1}">
-        <name>${sub.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</name>
-        <start>${inFrame}</start>
-        <end>${outFrame}</end>
-        <in>0</in>
-        <out>${outFrame - inFrame}</out>
-      </trackitem>`;
+      const inFrame = Math.round(sub.start * fps);
+      const outFrame = Math.max(inFrame + 1, Math.round(sub.end * fps));
+      const label = esc((sub.text || '').replace(/\s+/g, ' ').trim().slice(0, 80) || `Caption ${i + 1}`);
+      return `          <clipitem id="clipitem-${i + 1}">
+            <name>${label}</name>
+            <enabled>TRUE</enabled>
+            <duration>${outFrame - inFrame}</duration>
+            ${rate}
+            <start>${inFrame}</start>
+            <end>${outFrame}</end>
+            <in>0</in>
+            <out>${outFrame - inFrame}</out>
+            <comments><mastercomment1>${label}</mastercomment1></comments>
+          </clipitem>`;
     }).join('\n');
 
     return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE xmeml>
 <xmeml version="4">
-  <sequence>
-    <name>Subtitled Sequence (25 FPS)</name>
-    <rate>
-      <timebase>${fps}</timebase>
-      <ntsc>FALSE</ntsc>
-    </rate>
+  <sequence id="subtitler-sequence">
+    <name>Subtitled Sequence (${fps} FPS)</name>
+    <duration>${sequenceDuration}</duration>
+    ${rate}
     <media>
       <video>
+        <format>
+          <samplecharacteristics>
+            ${rate}
+            <width>${project.width}</width>
+            <height>${project.height}</height>
+            <pixelaspectratio>square</pixelaspectratio>
+          </samplecharacteristics>
+        </format>
         <track>
 ${clipNodes}
         </track>
@@ -218,22 +257,35 @@ ${clipNodes}
 
   // --- SRT & WebVTT Import/Export ---
   parseSRT(srtText) {
-    const pattern = /(\d+)\r?\n(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\r?\n([\s\S]*?)(?=\r?\n\r?\n|\$)/g;
+    // Strip a UTF-8 BOM and any WEBVTT header/NOTE blocks so the same parser
+    // handles .srt and .vtt.
+    const cleaned = String(srtText || '')
+      .replace(/^﻿/, '')
+      .replace(/^WEBVTT[^\n]*\n(?:[^\n]*\n)*?(?=\n)/i, '')
+      .replace(/^NOTE[^\n]*(?:\n[^\n]+)*\n?/gim, '');
+
+    // NOTE: the lookahead must end on a real end-of-input (`$`), not a literal
+    // "$", otherwise the final cue in a file with no trailing blank line is
+    // silently dropped.
+    const pattern = /(\d+)?\s*\r?\n?(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}|\d{1,2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}|\d{1,2}:\d{2}[,.]\d{1,3})[^\n]*\r?\n([\s\S]*?)(?=\r?\n\s*\r?\n|\s*$)/g;
     const subs = [];
     let match;
+    let idx = 0;
 
-    while ((match = pattern.exec(srtText)) !== null) {
+    while ((match = pattern.exec(cleaned)) !== null) {
+      const text = match[4].replace(/<[^>]*>/g, '').trim();
+      if (!match[2] || !match[3]) continue;
       subs.push({
-        id: 'sub_srt_' + match[1],
+        id: 'sub_srt_' + (idx++),
         start: this.timecodeToSeconds(match[2]),
         end: this.timecodeToSeconds(match[3]),
-        text: match[4].replace(/<[^>]*>/g, '').trim()
+        text: text
       });
     }
 
     if (subs.length === 0) {
       // Fallback simpler regex parser
-      const blocks = srtText.trim().split(/\r?\n\r?\n/);
+      const blocks = cleaned.trim().split(/\r?\n\r?\n/);
       blocks.forEach((block, idx) => {
         const lines = block.split(/\r?\n/);
         if (lines.length >= 2) {

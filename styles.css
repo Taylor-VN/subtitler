@@ -986,3 +986,257 @@ kbd {
   transform: scale(1.2);
   background-color: #ffffff;
 }
+
+/* ============================================================
+   Program Frame — locked to the project aspect ratio
+   ============================================================ */
+
+/* Exact size is set by VideoPlayerController.fitProgramFrame() so the frame
+   letterboxes correctly on both axes at any project aspect ratio. */
+.program-frame {
+  position: relative;
+  flex: 0 0 auto;
+  background-color: #000;
+  box-shadow: 0 0 0 1px var(--border-color), 0 8px 30px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.viewport-container {
+  padding: 12px;
+}
+
+.program-frame > #videoPlayer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background-color: #000;
+  /* Hidden until real media is loaded, otherwise its black backdrop would
+     cover the built-in demo picture. */
+  display: none;
+}
+.program-frame.has-media > #videoPlayer { display: block; }
+.program-frame.has-media > #demoCanvas { display: none; }
+
+.program-frame > #subtitleCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Title / Action safe guides */
+.safe-guides {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+.safe-guides.hidden { display: none; }
+.safe-guides .safe-action,
+.safe-guides .safe-title {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+.safe-guides .safe-action { inset: 5%; }
+.safe-guides .safe-title  { inset: 10%; border-style: dashed; }
+
+/* Aspect ratio switcher in the Program Monitor header */
+.aspect-ratio-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.aspect-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 2px;
+}
+
+.aspect-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.aspect-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+  border-color: var(--border-light);
+}
+.aspect-btn.active {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #fff;
+}
+
+.project-res {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-left: 6px;
+}
+
+/* ============================================================
+   ProRes export button + modal
+   ============================================================ */
+
+.btn-prores {
+  background: linear-gradient(180deg, #7b3fe4 0%, #5f2ec0 100%);
+  border: 1px solid #8f5bef;
+  color: #fff;
+  font-weight: 700;
+}
+.btn-prores:hover {
+  background: linear-gradient(180deg, #8b52ec 0%, #6c39d2 100%);
+}
+.btn-prores:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+#exportModal .modal-card { width: 520px; }
+
+.modal-hint {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.export-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.export-lbl {
+  font-size: 11px;
+  color: var(--text-muted);
+  width: 92px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.export-val {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-main);
+}
+
+.export-row .input-select { flex: 1; }
+
+.export-note {
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 9px 11px;
+  border-radius: 4px;
+  margin-top: 12px;
+  background: rgba(20, 115, 230, 0.1);
+  border: 1px solid rgba(20, 115, 230, 0.35);
+  color: var(--text-muted);
+}
+.export-note.warn {
+  background: rgba(255, 157, 0, 0.1);
+  border-color: rgba(255, 157, 0, 0.4);
+  color: var(--accent-amber);
+}
+.export-note.err {
+  background: rgba(255, 77, 77, 0.1);
+  border-color: rgba(255, 77, 77, 0.4);
+  color: var(--accent-red);
+}
+
+.export-progress { margin-top: 16px; }
+.export-progress.hidden { display: none; }
+
+.progress-track {
+  height: 6px;
+  background: var(--bg-input);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+}
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #7b3fe4, var(--accent-cyan));
+  transition: width 0.15s linear;
+}
+.progress-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 7px;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--bg-panel-header);
+  border-top: 1px solid var(--border-color);
+}
+
+/* Toast notifications (replaces blocking alert() dialogs) */
+.toast-stack {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 2000;
+  pointer-events: none;
+}
+.toast {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-light);
+  border-left: 3px solid var(--accent-blue);
+  border-radius: 5px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text-main);
+  max-width: 380px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  animation: toast-in 0.18s ease;
+  white-space: pre-line;
+}
+.toast.success { border-left-color: #35c46a; }
+.toast.warn    { border-left-color: var(--accent-amber); }
+.toast.error   { border-left-color: var(--accent-red); }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.program-frame > #demoCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.program-frame > #demoCanvas.hidden { display: none; }
+
+/* Caption currently on screen at the playhead */
+.caption-item.playing {
+  box-shadow: inset 3px 0 0 var(--accent-cyan);
+}
