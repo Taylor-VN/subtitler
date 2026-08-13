@@ -10,6 +10,8 @@ import http.server
 import socketserver
 import uuid
 
+from transcriber import Transcriber
+
 try:
     import webview
 except ImportError:  # pragma: no cover - only hit when pywebview is missing
@@ -76,6 +78,7 @@ class ExportApi:
     def __init__(self):
         self.jobs = {}
         self._lock = threading.Lock()
+        self.transcriber = Transcriber()
 
     # --- capability probe -------------------------------------------------
     def get_capabilities(self):
@@ -86,6 +89,44 @@ class ExportApi:
             'ffmpeg': bool(ffmpeg),
             'ffmpeg_path': ffmpeg or '',
         }
+
+    # --- AI transcription (see transcriber.py) ----------------------------
+    def transcribe_probe(self):
+        return self.transcriber.probe()
+
+    def transcribe_begin(self, options):
+        return self.transcriber.begin(options)
+
+    def transcribe_push_audio(self, job_id, b64_chunk):
+        return self.transcriber.push_audio(job_id, b64_chunk)
+
+    def transcribe_finish_audio(self, job_id):
+        return self.transcriber.finish_audio_and_run(job_id)
+
+    def transcribe_status(self, job_id):
+        return self.transcriber.status(job_id)
+
+    def transcribe_cancel(self, job_id):
+        return self.transcriber.cancel(job_id)
+
+    def transcribe_cleanup(self, job_id):
+        return self.transcriber.cleanup(job_id)
+
+    # --- model management -------------------------------------------------
+    def models_list(self):
+        return self.transcriber.list_models()
+
+    def model_install(self, model_id):
+        return self.transcriber.install_model(model_id)
+
+    def model_install_status(self, job_id):
+        return self.transcriber.install_status(job_id)
+
+    def model_install_cancel(self, job_id):
+        return self.transcriber.cancel_install(job_id)
+
+    def model_remove(self, model_id):
+        return self.transcriber.remove_model(model_id)
 
     # --- export lifecycle -------------------------------------------------
     def begin_export(self, meta):
@@ -230,7 +271,7 @@ if __name__ == '__main__':
     server_thread = threading.Thread(target=run_server, args=(port,), daemon=True)
     server_thread.start()
 
-    print(f"Launching Standalone Desktop Window for Subtitler Pro on port {port}...")
+    print(f"Launching Standalone Desktop Window for Taylor's Transcriber on port {port}...")
     if find_ffmpeg():
         print(f"ffmpeg found at {find_ffmpeg()} — ProRes 4444 alpha export enabled.")
     else:
@@ -238,9 +279,20 @@ if __name__ == '__main__':
 
     api = ExportApi()
 
+    _probe = api.transcribe_probe()
+    if _probe.get('available'):
+        print(f"AI transcription ready via {', '.join(_probe['engines'])} on {_probe['device_name']}.")
+        print(f"{_probe['installed_count']} model(s) installed. Manage them in Settings.")
+        if _probe.get('apple_silicon') and 'faster-whisper' in _probe['engines'] \
+                and not any(e.startswith('mlx') or 'parakeet' in e for e in _probe['engines']):
+            print("Note: faster-whisper runs CPU-only on Apple Silicon. "
+                  "Install mlx-whisper or parakeet-mlx to use the GPU.")
+    else:
+        print("AI transcription unavailable — run 'pip install -r requirements.txt' to enable it.")
+
     # Launch Native PyWebView Standalone Desktop Window
     webview.create_window(
-        title='Subtitler Pro — Premiere Captions Editor',
+        title="Taylor's Transcriber — Premiere Captions Editor",
         url=f'http://127.0.0.1:{port}',
         js_api=api,
         width=1400,

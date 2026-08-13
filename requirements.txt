@@ -1,0 +1,60 @@
+# Taylor's Transcriber — Python dependencies
+#
+#   pip install -r requirements.txt
+#
+# Desktop shell (required)
+pywebview>=4.4
+
+# Model downloads and install/remove management in Settings
+huggingface-hub>=0.23.0
+
+
+# ============================================================================
+# Transcription runtimes — install at least one
+# ============================================================================
+#
+# WHICH ONE MATTERS MORE THAN WHICH MODEL, especially on a Mac.
+#
+# CTranslate2 (what faster-whisper uses) has no Metal backend, so on Apple
+# Silicon it runs on CPU cores only and leaves the GPU completely idle. The MLX
+# runtimes below use the Apple GPU and are dramatically faster on the same
+# hardware.
+
+# --- Apple Silicon (M1/M2/M3/M4) --------------------------------------------
+# Uncomment these on a Mac. Both use the GPU through Apple's MLX framework.
+#
+# mlx-whisper>=0.4.0        # Whisper family on the Apple GPU
+# parakeet-mlx>=0.3.0       # NVIDIA Parakeet — fastest accurate English option
+# mlx-qwen3-asr>=0.1.0      # Qwen3-ASR — strongest multilingual / noisy / accented
+
+# --- NVIDIA GPU or generic CPU ----------------------------------------------
+# faster-whisper>=1.0.0
+
+# --- Any Hugging Face checkpoint (Cohere Transcribe, Granite Speech, …) ------
+# Heavier install; needed for the accuracy-tier models that are not MLX ports.
+#
+# transformers>=4.40.0
+# torch>=2.2.0
+
+
+# ============================================================================
+# Word-timing forced aligner (strongly recommended for captions)
+# ============================================================================
+#
+# The most accurate speech models return text with no word timings at all, and
+# Whisper's own timings are inferred from cross-attention rather than measured.
+# The aligner pins each word to the audio, which is what caption timing depends
+# on. Install it from the Settings panel once these are present.
+#
+# torch>=2.2.0
+# torchaudio>=2.2.0
+
+
+# ============================================================================
+# ProRes export
+# ============================================================================
+#
+# ffmpeg is a system binary, not a Python package:
+#   macOS          brew install ffmpeg
+#   Debian/Ubuntu  sudo apt install ffmpeg
+#   Windows        https://www.gyan.dev/ffmpeg/builds/

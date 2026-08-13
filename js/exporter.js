@@ -188,8 +188,8 @@ class AlphaExporter {
   buildFfmpegReadme(fps, profile, project) {
     const profileName = profile === 5 ? '4444 XQ' : '4444';
     return [
-      'Alpha subtitle PNG sequence exported from Subtitler Pro',
-      '======================================================',
+      "Alpha subtitle PNG sequence exported from Taylor's Transcriber",
+      '==============================================================',
       '',
       `Resolution : ${project.width}x${project.height} (${project.label})`,
       `Frame rate : ${fps} fps`,

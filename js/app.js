@@ -1,5 +1,5 @@
 /**
- * Subtitler Main Application
+ * Taylor's Transcriber — Main Application
  * Premiere Pro Style Subtitling Tool Entry Point
  */
 
@@ -30,6 +30,20 @@ document.addEventListener('DOMContentLoaded', () => {
   );
 
   const exporter = new AlphaExporter(playerController, subManager, FPS);
+  const transcriber = new TranscriptionController();
+  const settings = new SettingsController({
+    toast: (m, k, d) => toast(m, k, d),
+    onModelsChanged: () => populateModelSelect()
+  });
+  const segmenter = new CaptionSegmenter({ fps: FPS });
+
+  // Holds the last transcription so segmentation settings can be re-applied
+  // without paying for another model run.
+  let lastTranscription = null;
+
+  // Assigned when the transcribe dialog binds; keeps the model dropdown and the
+  // language/alignment rules in one place while staying callable from outside.
+  let applyModelRules = () => {};
 
   // Exposed for debugging and for the automated UI tests.
   window.__player = playerController;
@@ -37,6 +51,10 @@ document.addEventListener('DOMContentLoaded', () => {
   window.__timeline = timelineController;
   window.__exporter = exporter;
   window.__presets = presetParser;
+  window.__transcriber = transcriber;
+  window.__settings = settings;
+  window.__segmenter = segmenter;
+  window.__applyTranscription = applyTranscription;
 
   // --- Toast notifications (non-blocking replacement for alert()) ---
   const toastStack = document.createElement('div');
@@ -60,6 +78,8 @@ document.addEventListener('DOMContentLoaded', () => {
   bindStyleInspectorUI();
   bindTimelineToolbar();
   bindExportModal();
+  bindTranscribeModal();
+  settings.bind();
   bindKeyboardShortcuts();
 
   applyPresetToUI(playerController.activePreset);
@@ -71,7 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupDemoPicture();
 
     const starterSubs = [
-      { start: 1.0, end: 4.5, text: "Welcome to Subtitler Pro!", speaker: "Host" },
+      { start: 1.0, end: 4.5, text: "Welcome to Taylor's Transcriber!", speaker: "Host" },
       { start: 5.0, end: 9.2, text: "Designed with Premiere Pro workflows in mind.", speaker: "Host" },
       { start: 10.0, end: 14.0, text: "Drag subtitles on the timeline or edit timestamps on the left.", speaker: "Editor" },
       { start: 14.8, end: 19.5, text: "Import your .prfpset preset files to customize style presets!", speaker: "Editor" },
@@ -292,6 +312,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('mediaInfoLabel').textContent = file.name;
     document.getElementById('programFrame').classList.add('has-media');
     timelineController.loadAudioWaveform(file);
+    transcriber.setFile(file);
+    lastTranscription = null; // belongs to the previous media
     toast(`Loaded "${file.name}".`, 'success');
   }
 
@@ -852,6 +874,325 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // --- AI Transcription ---
+  /**
+   * Fills the model dropdown from the backend registry. Only models that are
+   * installed AND whose runtime is present can actually run, so anything else
+   * is shown disabled with a pointer to Settings rather than silently failing
+   * at transcribe time.
+   */
+  async function populateModelSelect() {
+    const select = document.getElementById('transcribeModelSelect');
+    if (!select) return;
+
+    // Gate on the API this dropdown actually feeds, not on the settings panel's.
+    if (!transcriber.hasBackend()) {
+      select.innerHTML = '<option value="">Desktop backend required</option>';
+      return;
+    }
+
+    try {
+      if (!settings.models || settings.models.length === 0) {
+        const probe = await transcriber.probe();
+        settings.probe = probe;
+        settings.models = probe.models || [];
+        settings.aligner = probe.aligner || null;
+      }
+    } catch (e) {
+      select.innerHTML = '<option value="">Could not read model list</option>';
+      return;
+    }
+
+    const previous = select.value;
+    const models = settings.models || [];
+    const usable = models.filter(m => m.installed && m.engine_available);
+    const rest = models.filter(m => !(m.installed && m.engine_available));
+
+    select.innerHTML = '';
+
+    if (usable.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No models installed — open Settings to install one';
+      select.appendChild(opt);
+    }
+
+    const addGroup = (label, list, disabled) => {
+      if (list.length === 0) return;
+      const group = document.createElement('optgroup');
+      group.label = label;
+      list.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        const wer = m.wer ? ` · ${m.wer}% WER` : '';
+        const gpu = (m.engine.indexOf('mlx') !== -1 || m.engine.indexOf('parakeet') !== -1) ? ' · GPU' : '';
+        const eng = m.english_only ? ' · English only' : '';
+        opt.textContent = `${m.label}${wer}${gpu}${eng}`;
+        opt.disabled = !!disabled;
+        group.appendChild(opt);
+      });
+      select.appendChild(group);
+    };
+
+    addGroup('Ready to use', usable, false);
+    addGroup('Not installed — see Settings', rest, true);
+
+    const custom = document.createElement('option');
+    custom.value = '__custom__';
+    custom.textContent = 'Custom Hugging Face model / local folder…';
+    select.appendChild(custom);
+
+    // Keep the previous choice, else the recommended model, else the first usable one.
+    const wanted = [previous, settings.probe && settings.probe.recommended]
+      .find(id => id && usable.some(m => m.id === id));
+    select.value = wanted || (usable[0] ? usable[0].id : '');
+    applyModelRules();
+  }
+
+  /** Re-segments the stored transcription and pushes it into the caption list. */
+  function applyTranscription(result, opts = {}) {
+    if (!result) return 0;
+    // Remember it so the segmentation controls can re-cut the same
+    // transcription without paying for another model run.
+    lastTranscription = result;
+    segmenter.updateSettings({
+      maxCharsPerLine: opts.maxCharsPerLine,
+      maxLines: opts.maxLines,
+      maxDurationSec: opts.maxDurationSec,
+      fps: FPS
+    });
+
+    const words = transcriber.collectWords(result);
+    const captions = words.length
+      ? segmenter.segment(words)
+      : segmenter.segmentFromSegments(result.segments);
+
+    if (captions.length === 0) return 0;
+
+    if (opts.replace === false) {
+      const existing = subManager.getSubtitles().map(s => ({ start: s.start, end: s.end, text: s.text }));
+      subManager.setSubtitles([...existing, ...captions]);
+    } else {
+      subManager.setSubtitles(captions);
+    }
+
+    timelineController.resizeAndDraw();
+    return captions.length;
+  }
+
+  function bindTranscribeModal() {
+    const modal = document.getElementById('transcribeModal');
+    const modelSelect = document.getElementById('transcribeModelSelect');
+    const customRow = document.getElementById('customModelRow');
+    const customInput = document.getElementById('transcribeCustomModel');
+    const startBtn = document.getElementById('btnStartTranscribe');
+    const cancelBtn = document.getElementById('btnCancelTranscribe');
+    const note = document.getElementById('transcribeBackendNote');
+    const progressWrap = document.getElementById('transcribeProgressWrap');
+    const progressBar = document.getElementById('transcribeProgressBar');
+    const progressText = document.getElementById('transcribeProgressText');
+    const mediaInfo = document.getElementById('transcribeMediaInfo');
+    const modelNote = document.getElementById('transcribeModelNote');
+
+    const segChars = document.getElementById('segMaxChars');
+    const segLines = document.getElementById('segMaxLines');
+    const segDur = document.getElementById('segMaxDur');
+    let running = false;
+
+    segChars.addEventListener('input', () => {
+      document.getElementById('segMaxCharsVal').textContent = segChars.value;
+      reSegmentIfPossible();
+    });
+    segDur.addEventListener('input', () => {
+      document.getElementById('segMaxDurVal').textContent = `${parseFloat(segDur.value).toFixed(1)}s`;
+      reSegmentIfPossible();
+    });
+    segLines.addEventListener('change', reSegmentIfPossible);
+
+    /** Live re-cut of an existing transcription — no model run required. */
+    function reSegmentIfPossible() {
+      if (running || !lastTranscription) return;
+      const n = applyTranscription(lastTranscription, readSegmentSettings());
+      if (n) progressText.textContent = `Re-segmented into ${n} captions.`;
+    }
+
+    function readSegmentSettings() {
+      return {
+        maxCharsPerLine: parseInt(segChars.value, 10),
+        maxLines: parseInt(segLines.value, 10),
+        maxDurationSec: parseFloat(segDur.value),
+        replace: document.getElementById('transcribeReplace').checked
+      };
+    }
+
+    modelSelect.addEventListener('change', () => {
+      customRow.classList.toggle('hidden', modelSelect.value !== '__custom__');
+      applyModelLanguageRules();
+    });
+
+    /**
+     * Keeps the language picker honest about the selected model.
+     * An English-only model paired with, say, Japanese returns confident
+     * nonsense rather than an error, so those options are disabled outright.
+     */
+    function applyModelLanguageRules() {
+      const langSelect = document.getElementById('transcribeLanguage');
+      const alignSelect = document.getElementById('transcribeAlign');
+      const model = (settings.models || []).find(m => m.id === modelSelect.value);
+
+      const englishOnly = !!(model && model.english_only);
+      Array.from(langSelect.options).forEach(opt => {
+        const blocked = englishOnly && opt.value !== 'en';
+        opt.disabled = blocked;
+        opt.textContent = opt.textContent.replace(/ — unavailable.*$/, '');
+        if (blocked && opt.value === 'auto') opt.textContent += ' — unavailable (English-only model)';
+      });
+      if (englishOnly) {
+        langSelect.value = 'en';
+        modelNote.textContent = `${model.label} is English-only — language locked to English.`;
+        modelNote.classList.remove('hidden');
+      } else if (model && !model.word_timings) {
+        modelNote.textContent =
+          `${model.label} does not report word timings, so the forced aligner supplies them.`;
+        modelNote.classList.remove('hidden');
+      } else {
+        modelNote.classList.add('hidden');
+      }
+
+      // "Model's own timings only" is meaningless when the model has none.
+      const neverOpt = Array.from(alignSelect.options).find(o => o.value === 'never');
+      if (neverOpt) {
+        neverOpt.disabled = !!(model && !model.word_timings);
+        if (neverOpt.disabled && alignSelect.value === 'never') alignSelect.value = 'auto';
+      }
+    }
+
+    applyModelRules = applyModelLanguageRules;
+
+    async function updateBackendNote() {
+      const probe = await transcriber.probe();
+
+      if (!transcriber.hasBackend()) {
+        note.className = 'export-note warn';
+        note.textContent =
+          'AI transcription needs the desktop backend. Launch with run_subtitler.sh '
+          + '(or "python3 app.py") instead of opening index.html directly in a browser.';
+        startBtn.disabled = true;
+        return;
+      }
+      if (!probe.available) {
+        note.className = 'export-note err';
+        note.textContent =
+          'No transcription engine is installed. Run "pip install -r requirements.txt" '
+          + "in the Taylor's Transcriber folder, then relaunch.";
+        startBtn.disabled = true;
+        return;
+      }
+
+      const installed = (probe.models || []).filter(m => m.installed && m.engine_available);
+      if (installed.length === 0) {
+        note.className = 'export-note warn';
+        note.textContent =
+          `No models are installed yet. Open Settings to install one — `
+          + `${probe.device_name} detected.`;
+        startBtn.disabled = true;
+        return;
+      }
+
+      note.className = 'export-note';
+      const alignerReady = probe.aligner && probe.aligner.installed && probe.aligner.available;
+      note.textContent =
+        `Ready — ${installed.length} model${installed.length === 1 ? '' : 's'} installed, `
+        + `running on ${probe.device_name}. `
+        + (alignerReady
+            ? 'Forced aligner installed, so word timings are measured rather than inferred.'
+            : 'Forced aligner not installed — install it in Settings for the most precise caption timing.');
+      startBtn.disabled = !transcriber.currentFile;
+    }
+
+    async function openModal() {
+      const file = transcriber.currentFile;
+      mediaInfo.textContent = file ? file.name : 'No media loaded — load a video or audio file first';
+      progressWrap.classList.add('hidden');
+      progressBar.style.width = '0%';
+      modal.classList.remove('hidden');
+      await populateModelSelect();
+      updateBackendNote();
+    }
+
+    function closeModal() {
+      if (running) {
+        transcriber.cancel();
+        running = false;
+      }
+      modal.classList.add('hidden');
+    }
+
+    document.getElementById('btnTranscribe').addEventListener('click', openModal);
+    document.getElementById('btnCloseTranscribeModal').addEventListener('click', closeModal);
+    cancelBtn.addEventListener('click', closeModal);
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+
+    startBtn.addEventListener('click', async () => {
+      if (running) return;
+      if (!transcriber.currentFile) {
+        toast('Load a video or audio file before transcribing.', 'warn');
+        return;
+      }
+
+      running = true;
+      startBtn.disabled = true;
+      playerController.pause();
+      progressWrap.classList.remove('hidden');
+      progressBar.style.width = '0%';
+      progressText.textContent = 'Preparing…';
+
+      try {
+        const result = await transcriber.transcribe({
+          model: modelSelect.value === '__custom__' ? 'small' : modelSelect.value,
+          customModel: modelSelect.value === '__custom__' ? customInput.value.trim() : '',
+          language: document.getElementById('transcribeLanguage').value,
+          task: document.getElementById('transcribeTask').value,
+          vad: document.getElementById('transcribeVad').checked,
+          align: ({ auto: 'auto', always: true, never: false })[
+            document.getElementById('transcribeAlign').value],
+          onProgress: (frac, msg) => {
+            progressBar.style.width = `${Math.round(frac * 100)}%`;
+            progressText.textContent = `${msg} (${Math.round(frac * 100)}%)`;
+          }
+        });
+
+        lastTranscription = result;
+        const count = applyTranscription(result, readSegmentSettings());
+
+        if (count === 0) {
+          toast('The model did not find any speech in this media.', 'warn', 6000);
+          progressText.textContent = 'No speech detected.';
+        } else {
+          const lang = result.language ? ` (${result.language})` : '';
+          const aligned = result.alignment_used ? ', word timings force-aligned' : '';
+          toast(`Transcribed into ${count} captions${lang}${aligned}. `
+            + 'Adjust the segmentation sliders to re-cut them instantly.', 'success', 8000);
+          progressText.textContent = `Done — ${count} captions.`;
+          modal.classList.add('hidden');
+        }
+      } catch (err) {
+        const msg = err.message || String(err);
+        if (msg === 'Cancelled.') {
+          progressText.textContent = 'Cancelled.';
+        } else {
+          note.className = 'export-note err';
+          note.textContent = msg;
+          progressText.textContent = 'Failed.';
+          toast(`Transcription failed: ${msg}`, 'error', 9000);
+        }
+      } finally {
+        running = false;
+        startBtn.disabled = false;
+      }
+    });
+  }
+
   // --- Keyboard Shortcuts ---
   function bindKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
@@ -861,13 +1202,18 @@ document.addEventListener('DOMContentLoaded', () => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
 
       const exportOpen = !document.getElementById('exportModal').classList.contains('hidden');
+      const transcribeOpen = !document.getElementById('transcribeModal').classList.contains('hidden');
+      const settingsOpen = !document.getElementById('settingsModal').classList.contains('hidden');
 
       if (e.key === 'Escape') {
         document.getElementById('shortcutsModal').classList.add('hidden');
         document.getElementById('exportModal').classList.add('hidden');
+        document.getElementById('transcribeModal').classList.add('hidden');
+        document.getElementById('settingsModal').classList.add('hidden');
         return;
       }
-      if (exportOpen) return; // don't drive the editor while the export dialog is up
+      // Don't drive the editor while a dialog is up
+      if (exportOpen || transcribeOpen || settingsOpen) return;
 
       switch (e.code) {
         case 'Space':
@@ -914,6 +1260,12 @@ document.addEventListener('DOMContentLoaded', () => {
           break;
         case 'e':
           document.getElementById('btnExportAlpha').click();
+          break;
+        case 't':
+          document.getElementById('btnTranscribe').click();
+          break;
+        case ',':
+          document.getElementById('btnSettings').click();
           break;
         case 'm': {
           const isMuted = playerController.toggleMute();
@@ -1034,15 +1386,30 @@ document.addEventListener('DOMContentLoaded', () => {
       dctx.fillStyle = grad;
       dctx.beginPath(); dctx.arc(cx, cy, radius, 0, Math.PI * 2); dctx.fill();
 
-      dctx.fillStyle = '#ffffff';
-      dctx.font = `bold ${Math.round(46 * s)}px sans-serif`;
       dctx.textAlign = 'center';
       dctx.textBaseline = 'middle';
-      dctx.fillText('SUBTITLER PRO DEMO', w / 2, h * 0.32);
 
-      dctx.font = `${Math.round(30 * s)}px "Roboto Mono", monospace`;
+      // Shrink to fit rather than run off the edge of a narrow frame — the
+      // 9:16 project is only 1080 wide but scales type up by height.
+      const fitFont = (text, startPx, makeFont, maxWidth) => {
+        let size = startPx;
+        dctx.font = makeFont(size);
+        while (size > 8 && dctx.measureText(text).width > maxWidth) {
+          size -= 1;
+          dctx.font = makeFont(size);
+        }
+      };
+      const maxW = w * 0.86;
+
+      const title = "TAYLOR'S TRANSCRIBER";
+      dctx.fillStyle = '#ffffff';
+      fitFont(title, Math.round(46 * s), (n) => `bold ${n}px sans-serif`, maxW);
+      dctx.fillText(title, w / 2, h * 0.32);
+
+      const sub = `${project.label}  •  ${w}×${h}  •  25 FPS`;
       dctx.fillStyle = '#8fa8c8';
-      dctx.fillText(`${project.label}  •  ${w}×${h}  •  25 FPS`, w / 2, h * 0.4);
+      fitFont(sub, Math.round(30 * s), (n) => `${n}px "Roboto Mono", monospace`, maxW);
+      dctx.fillText(sub, w / 2, h * 0.4);
     });
   }
 });
