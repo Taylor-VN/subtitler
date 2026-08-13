@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Subtitler — Premiere Pro Style Captions Editor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Montserrat:wght@600;700;800;900&family=Roboto+Mono:wght@400;500;700&family=Outfit:wght@600;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="dark-theme">
+  <!-- Top App Navigation / Toolbar -->
+  <header class="app-header">
+    <div class="brand">
+      <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="2" y="4" width="20" height="16" rx="3"></rect>
+        <path d="M7 15h4M13 15h4M7 11h10"></path>
+      </svg>
+      <span class="brand-title">Subtitler Pro</span>
+      <span class="brand-badge">25 FPS</span>
+    </div>
+
+    <div class="header-controls">
+      <div class="file-actions">
+        <button id="btnTriggerLoadMedia" class="btn btn-secondary" title="Import Video or Audio">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+          Load Media
+        </button>
+        <input type="file" id="mediaFileInput" accept="video/*,audio/*" style="display:none">
+
+        <button id="btnTriggerImportSubs" class="btn btn-secondary" title="Import SRT / VTT Subtitles">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          Import Subs
+        </button>
+        <input type="file" id="subFileInput" accept=".srt,.vtt,.json" style="display:none">
+
+        <button id="btnTriggerImportPreset" class="btn btn-accent" title="Import Premiere Preset (.prfpset / .prtextstyle)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+          Import Preset (.prfpset)
+        </button>
+        <input type="file" id="presetFileInput" accept=".prfpset,.prtextstyle,.xml,.json" style="display:none">
+      </div>
+
+      <div class="timecode-display-box" title="Current Playhead Timecode (25 FPS)">
+        <span class="tc-label">TC</span>
+        <span id="headerTimecode" class="tc-value">00:00:00:00</span>
+      </div>
+
+      <div class="export-group">
+        <button id="btnExportSrt" class="btn btn-primary" title="Export as SubRip SRT">Export SRT</button>
+        <button id="btnExportVtt" class="btn btn-secondary" title="Export as WebVTT">Export VTT</button>
+        <button id="btnExportXml" class="btn btn-secondary" title="Export Premiere Pro Sequence XML">Export Premiere XML</button>
+        <button id="btnExportPreset" class="btn btn-outline" title="Export Style Preset">Export Preset</button>
+        <button id="btnShortcuts" class="btn btn-icon-only" title="Keyboard Shortcuts (?)">?</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Workspace Grid -->
+  <main class="workspace-grid">
+    
+    <!-- LEFT PANEL: Subtitle Captions List -->
+    <section class="panel panel-left" id="panelCaptions">
+      <div class="panel-header">
+        <div class="panel-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+          Captions List
+        </div>
+        <div class="panel-actions">
+          <button id="btnAddSubtitle" class="btn-icon" title="Add Subtitle Line at Playhead">+</button>
+          <button id="btnSplitSubtitle" class="btn-icon" title="Split Selected Subtitle at Playhead (C)">✂</button>
+          <button id="btnMergeSubtitle" class="btn-icon" title="Merge Selected with Next Subtitle">🔗</button>
+          <button id="btnShiftTimecodes" class="btn-icon" title="Shift All Timecodes (Offset)">⏱</button>
+          <button id="btnRippleDelete" class="btn-icon" title="Ripple Delete Selected Subtitle">⌫</button>
+          <button id="btnClearAll" class="btn-icon btn-icon-danger" title="Clear All Captions">🗑</button>
+        </div>
+      </div>
+
+      <div class="search-filter-bar">
+        <input type="text" id="subSearchInput" placeholder="Search captions..." class="input-search">
+        <span id="subCountBadge" class="count-badge">0 lines</span>
+      </div>
+
+      <div class="captions-list-container" id="captionsList">
+        <!-- Subtitle Items rendered dynamically -->
+      </div>
+    </section>
+
+    <!-- CENTER PANEL: Video Preview & Overlay Canvas -->
+    <section class="panel panel-center" id="panelPreview">
+      <div class="panel-header">
+        <div class="panel-title">Program Monitor</div>
+        <div class="panel-info" id="mediaInfoLabel">Sample Video Demo</div>
+      </div>
+
+      <div class="viewport-container" id="viewportContainer">
+        <!-- Video Element -->
+        <video id="videoPlayer" playsinline preload="auto"></video>
+
+        <!-- Subtitle Overlay Canvas -->
+        <canvas id="subtitleCanvas"></canvas>
+
+        <!-- Video Dropzone Overlay -->
+        <div id="dropzoneOverlay" class="dropzone-overlay hidden">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+          <p>Drop Video or Audio file here</p>
+        </div>
+      </div>
+
+      <!-- Playback Transport Controls -->
+      <div class="transport-bar">
+        <div class="transport-controls">
+          <button id="btnPrevSub" class="btn-transport" title="Jump to Previous Subtitle (K)">
+            <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="4" x2="5" y2="20" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
+          <button id="btnStepBack" class="btn-transport" title="Step 1 Frame Back (Left Arrow)">
+            <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="11 19 2 12 11 5 11 19"/><polygon points="22 19 13 12 22 5 22 19"/></svg>
+          </button>
+          <button id="btnPlayPause" class="btn-transport btn-play" title="Play / Pause (Spacebar)">
+            <svg id="playIcon" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <svg id="pauseIcon" viewBox="0 0 24 24" fill="currentColor" class="hidden"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+          </button>
+          <button id="btnStepForward" class="btn-transport" title="Step 1 Frame Forward (Right Arrow)">
+            <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="13 19 22 12 13 5 13 19"/><polygon points="2 19 11 12 2 5 2 19"/></svg>
+          </button>
+          <button id="btnNextSub" class="btn-transport" title="Jump to Next Subtitle (L)">
+            <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="4" x2="19" y2="20" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
+          <button id="btnLoopRegion" class="btn-transport" title="Toggle Loop Selected Subtitle Region (R)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+          </button>
+        </div>
+
+        <div class="timecode-readout">
+          <span id="currentTimecode">00:00:00:00</span>
+          <span class="time-sep">/</span>
+          <span id="durationTimecode">00:00:00:00</span>
+        </div>
+
+        <div class="transport-extras">
+          <label class="speed-select-label">
+            Speed:
+            <select id="playbackSpeedSelect" class="select-sm">
+              <option value="0.5">0.5x</option>
+              <option value="1.0" selected>1.0x</option>
+              <option value="1.5">1.5x</option>
+              <option value="2.0">2.0x</option>
+            </select>
+          </label>
+          <button id="btnFullscreen" class="btn-transport" title="Toggle Fullscreen Program Monitor (F)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT PANEL: Premiere Preset & Essential Graphics Style Inspector -->
+    <section class="panel panel-right" id="panelInspector">
+      <div class="panel-header">
+        <div class="panel-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Preset & Style Inspector
+        </div>
+      </div>
+
+      <div class="inspector-scroll">
+        <!-- Preset Quick Selector -->
+        <div class="style-group">
+          <div class="preset-select-header">
+            <label class="group-label">Premiere Style Presets</label>
+            <div class="preset-action-btns">
+              <button id="btnResetStyle" class="btn-xs btn-outline" title="Reset to Preset Default">Reset</button>
+              <button id="btnSaveCustomPreset" class="btn-xs btn-primary" title="Save Current Style as New Preset">+ Save</button>
+            </div>
+          </div>
+          <select id="presetSelect" class="input-select">
+            <option value="classic_yellow">Classic Film Yellow (Premiere Pro)</option>
+            <option value="tiktok_pop">TikTok Pop (Bold Cyan Stroke)</option>
+            <option value="netflix_clean">Netflix Clean (Bottom Center)</option>
+            <option value="cinematic_boxed">Cinematic Black Box</option>
+            <option value="cyber_neon">Cyber Neon Glow</option>
+            <option value="minimal_white">Minimal White Shadow</option>
+          </select>
+        </div>
+
+        <!-- Typography -->
+        <div class="style-group">
+          <label class="group-label">Typography</label>
+          <div class="input-row">
+            <select id="fontFamily" class="input-select flex-1">
+              <option value="Inter">Inter</option>
+              <option value="Montserrat">Montserrat</option>
+              <option value="Roboto">Roboto</option>
+              <option value="Impact">Impact</option>
+              <option value="Outfit">Outfit</option>
+              <option value="Courier New">Courier</option>
+            </select>
+            <input type="number" id="fontSize" class="input-num" value="42" min="12" max="140" title="Font Size (px)">
+          </div>
+          <div class="input-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="fontWeightBold" checked> Bold
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="fontStyleItalic"> Italic
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="textUppercase"> ALL CAPS
+            </label>
+          </div>
+        </div>
+
+        <!-- Text Fill & Stroke -->
+        <div class="style-group">
+          <label class="group-label">Fill & Stroke (Outline)</label>
+          <div class="input-row">
+            <span class="input-lbl">Fill Color:</span>
+            <input type="color" id="fillColor" value="#ffea00" class="input-color">
+          </div>
+          <div class="input-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="enableStroke" checked> Stroke:
+            </label>
+            <input type="color" id="strokeColor" value="#000000" class="input-color">
+            <input type="range" id="strokeWidth" min="1" max="20" value="6" class="input-range">
+            <span id="strokeWidthVal" class="range-val">6px</span>
+          </div>
+        </div>
+
+        <!-- Background Box -->
+        <div class="style-group">
+          <label class="group-label">Background Box</label>
+          <div class="input-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="enableBgBox"> Enable Box
+            </label>
+            <input type="color" id="bgBoxColor" value="#000000" class="input-color">
+          </div>
+          <div class="input-row">
+            <span class="input-lbl">Opacity:</span>
+            <input type="range" id="bgBoxOpacity" min="0" max="100" value="75" class="input-range">
+            <span id="bgBoxOpacityVal" class="range-val">75%</span>
+          </div>
+          <div class="input-row">
+            <span class="input-lbl">Padding:</span>
+            <input type="range" id="bgBoxPadding" min="0" max="40" value="12" class="input-range">
+            <span id="bgBoxPaddingVal" class="range-val">12px</span>
+          </div>
+        </div>
+
+        <!-- Drop Shadow -->
+        <div class="style-group">
+          <label class="group-label">Drop Shadow</label>
+          <div class="input-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="enableShadow" checked> Drop Shadow
+            </label>
+            <input type="color" id="shadowColor" value="#000000" class="input-color">
+          </div>
+          <div class="input-row">
+            <span class="input-lbl">Blur:</span>
+            <input type="range" id="shadowBlur" min="0" max="30" value="8" class="input-range">
+          </div>
+          <div class="input-row">
+            <span class="input-lbl">Offset Y:</span>
+            <input type="range" id="shadowOffsetY" min="-20" max="30" value="4" class="input-range">
+          </div>
+        </div>
+
+        <!-- Alignment Grid -->
+        <div class="style-group">
+          <label class="group-label">Screen Alignment & Position</label>
+          <div class="align-grid">
+            <button class="align-btn" data-align="top-left">↖</button>
+            <button class="align-btn" data-align="top-center">↑</button>
+            <button class="align-btn" data-align="top-right">↗</button>
+            <button class="align-btn" data-align="center-left">←</button>
+            <button class="align-btn" data-align="center">•</button>
+            <button class="align-btn" data-align="center-right">→</button>
+            <button class="align-btn" data-align="bottom-left">↙</button>
+            <button class="align-btn active" data-align="bottom-center">↓</button>
+            <button class="align-btn" data-align="bottom-right">↘</button>
+          </div>
+          <div class="input-row margin-top-sm">
+            <span class="input-lbl">Bottom Margin:</span>
+            <input type="range" id="bottomMargin" min="10" max="250" value="50" class="input-range">
+            <span id="bottomMarginVal" class="range-val">50px</span>
+          </div>
+        </div>
+
+        <!-- Animation Effects -->
+        <div class="style-group">
+          <label class="group-label">Animation Preset</label>
+          <select id="animationPreset" class="input-select">
+            <option value="none">None (Static)</option>
+            <option value="fade">Fade In/Out</option>
+            <option value="pop">Pop In Scale</option>
+            <option value="karaoke">Karaoke Highlight</option>
+          </select>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- BOTTOM PANEL: Interactive Timeline -->
+    <section class="panel panel-bottom" id="panelTimeline">
+      <div class="timeline-toolbar">
+        <div class="timeline-tools">
+          <button id="btnZoomOut" class="btn-tool" title="Zoom Out Timeline (-)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+          </button>
+          <input type="range" id="timelineZoom" min="10" max="200" value="50" class="zoom-slider">
+          <button id="btnZoomIn" class="btn-tool" title="Zoom In Timeline (+)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+          </button>
+        </div>
+
+        <div class="snap-toggle-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="snapToGrid" checked> Snap to Playhead / Clips
+          </label>
+        </div>
+      </div>
+
+      <!-- Main Timeline Canvas & Tracks Container -->
+      <div class="timeline-container" id="timelineContainer">
+        <!-- Ruler Bar -->
+        <div class="timeline-ruler-wrapper">
+          <div class="track-header ruler-header">Time</div>
+          <div class="ruler-content">
+            <canvas id="rulerCanvas"></canvas>
+          </div>
+        </div>
+
+        <!-- Tracks Scroll View -->
+        <div class="timeline-tracks-wrapper" id="tracksWrapper">
+          <!-- Audio Waveform Track -->
+          <div class="track track-audio">
+            <div class="track-header">
+              <span>Audio</span>
+              <div class="track-btns">
+                <button id="btnAudioMute" class="btn-track-toggle" title="Mute Audio (M)">M</button>
+                <button id="btnAudioSolo" class="btn-track-toggle" title="Solo Audio (S)">S</button>
+              </div>
+            </div>
+            <div class="track-content">
+              <canvas id="waveformCanvas"></canvas>
+            </div>
+          </div>
+
+          <!-- Subtitles Track -->
+          <div class="track track-subtitle">
+            <div class="track-header">
+              <span>Subtitles</span>
+              <div class="track-btns">
+                <button id="btnSubHide" class="btn-track-toggle" title="Hide Subtitles Overlay">👁</button>
+                <button id="btnSubLock" class="btn-track-toggle" title="Lock Subtitles Track">🔒</button>
+              </div>
+            </div>
+            <div class="track-content" id="subtitleTrackContent">
+              <!-- Draggable clip blocks rendered here -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Playhead Scrubber Line -->
+        <div id="playheadScrubber" class="playhead-line">
+          <div class="playhead-head"></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Keyboard Shortcuts Modal -->
+  <div id="shortcutsModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Keyboard Shortcuts</h3>
+        <button id="btnCloseModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="shortcut-row"><kbd>Space</kbd> <span>Play / Pause Video</span></div>
+        <div class="shortcut-row"><kbd>←</kbd> / <kbd>→</kbd> <span>Step 1 Frame Back / Forward (@ 25 FPS)</span></div>
+        <div class="shortcut-row"><kbd>Shift + ← / →</kbd> <span>Jump 1 Second Back / Forward</span></div>
+        <div class="shortcut-row"><kbd>C</kbd> <span>Split Selected Subtitle at Playhead</span></div>
+        <div class="shortcut-row"><kbd>Delete / Backspace</kbd> <span>Delete Selected Subtitle</span></div>
+        <div class="shortcut-row"><kbd>K</kbd> <span>Jump to Previous Subtitle</span></div>
+        <div class="shortcut-row"><kbd>L</kbd> <span>Jump to Next Subtitle</span></div>
+        <div class="shortcut-row"><kbd>R</kbd> <span>Toggle Subtitle Loop Region</span></div>
+        <div class="shortcut-row"><kbd>F</kbd> <span>Toggle Fullscreen Program Monitor</span></div>
+        <div class="shortcut-row"><kbd>M</kbd> <span>Toggle Audio Mute</span></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/presetParser.js"></script>
+  <script src="js/subtitleManager.js"></script>
+  <script src="js/videoPlayer.js"></script>
+  <script src="js/timeline.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
