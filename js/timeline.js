@@ -5,6 +5,7 @@
 
 const TRACK_HEADER_WIDTH = 90;
 const RULER_HEIGHT = 24;
+const MIN_CLIP_SEC = 0.1;
 
 class TimelineController {
   constructor(rulerCanvas, waveformCanvas, subtitleTrackContainer, playheadElement, subtitleManager, videoPlayer, fps = 25) {
@@ -84,6 +85,7 @@ class TimelineController {
       this.isDraggingPlayhead = false;
       if (this.draggedClipInfo) {
         this.draggedClipInfo = null;
+        this.renderClips();
       }
       document.body.style.cursor = 'default';
     });
@@ -353,15 +355,48 @@ class TimelineController {
   }
 
   // --- Subtitle Track Clips Rendering & Dragging ---
+  /**
+   * Ids of captions whose span intersects another. Overlaps should not be
+   * reachable by dragging any more, but imports and hand-edited timecodes can
+   * still produce them, and only one caption can be on screen at a time — so
+   * they are flagged rather than left to silently shadow each other.
+   */
+  findOverlaps(subs) {
+    const overlapping = new Set();
+    for (let i = 0; i < subs.length; i++) {
+      for (let j = i + 1; j < subs.length; j++) {
+        if (subs[j].start >= subs[i].end) break; // sorted by start
+        overlapping.add(subs[i].id);
+        overlapping.add(subs[j].id);
+      }
+    }
+    return overlapping;
+  }
+
   renderClips() {
     this.subtitleContainer.innerHTML = '';
     const subs = this.subManager.getSubtitles();
     const selectedId = this.subManager.selectedId;
+    const draggingId = this.draggedClipInfo ? this.draggedClipInfo.id : null;
+    const overlapping = this.findOverlaps(subs);
 
     subs.forEach(sub => {
       const clipEl = document.createElement('div');
-      clipEl.className = `subtitle-clip ${sub.id === selectedId ? 'selected' : ''}`;
-      
+      // Stacking decides which clip's trim handles are grabbable where two
+      // overlap, so the one being worked on is always raised above its
+      // neighbours.
+      clipEl.className = [
+        'subtitle-clip',
+        sub.id === selectedId ? 'selected' : '',
+        sub.id === draggingId ? 'dragging' : '',
+        overlapping.has(sub.id) ? 'overlapping' : ''
+      ].filter(Boolean).join(' ');
+
+      if (overlapping.has(sub.id)) {
+        clipEl.title = 'This caption overlaps another. Only one caption shows at a '
+          + 'time, so drag or trim them apart.';
+      }
+
       const leftPx = sub.start * this.zoomLevel;
       const widthPx = Math.max(16, (sub.end - sub.start) * this.zoomLevel);
 
@@ -372,13 +407,13 @@ class TimelineController {
       // Left Trim Handle
       const leftHandle = document.createElement('div');
       leftHandle.className = 'clip-handle handle-left';
-      leftHandle.title = 'Trim Start Point';
+      leftHandle.title = 'Trim the in point';
       leftHandle.addEventListener('mousedown', (e) => this.startClipDrag(e, sub.id, 'trim-left'));
 
       // Right Trim Handle
       const rightHandle = document.createElement('div');
       rightHandle.className = 'clip-handle handle-right';
-      rightHandle.title = 'Trim End Point';
+      rightHandle.title = 'Trim the out point';
       rightHandle.addEventListener('mousedown', (e) => this.startClipDrag(e, sub.id, 'trim-right'));
 
       // Text Label
@@ -409,6 +444,30 @@ class TimelineController {
     });
   }
 
+  /**
+   * How far a clip may travel before it would collide with a neighbour.
+   *
+   * Measured once at drag start, so the limits cannot shift under the cursor as
+   * the store re-sorts mid-drag.
+   *
+   * Only clips that are *clear* of this one count as neighbours. If the caption
+   * already overlaps something — imported SRTs and hand-typed timecodes can do
+   * that — no limit is found on that side, which leaves the user free to drag
+   * out of the overlap rather than being pinned inside it.
+   */
+  neighbourLimits(sub) {
+    let left = 0;
+    let right = Infinity;
+
+    this.subManager.getSubtitles().forEach(other => {
+      if (other.id === sub.id) return;
+      if (other.end <= sub.start) left = Math.max(left, other.end);
+      if (other.start >= sub.end) right = Math.min(right, other.start);
+    });
+
+    return { left, right };
+  }
+
   startClipDrag(e, subId, mode) {
     e.stopPropagation();
     e.preventDefault();
@@ -421,10 +480,12 @@ class TimelineController {
       startX: e.clientX,
       initialStart: sub.start,
       initialEnd: sub.end,
-      initialDuration: sub.end - sub.start
+      initialDuration: sub.end - sub.start,
+      limits: this.neighbourLimits(sub)
     };
 
     document.body.style.cursor = mode === 'move' ? 'grabbing' : 'ew-resize';
+    this.renderClips();
   }
 
   /**
@@ -456,21 +517,37 @@ class TimelineController {
 
   handleClipDragMove(e) {
     if (!this.draggedClipInfo) return;
-    const { id, mode, startX, initialStart, initialEnd, initialDuration } = this.draggedClipInfo;
-    const deltaPx = e.clientX - startX;
-    const deltaSec = deltaPx / this.zoomLevel;
+    const { id, mode, startX, initialStart, initialEnd, initialDuration, limits } =
+      this.draggedClipInfo;
+    const deltaSec = (e.clientX - startX) / this.zoomLevel;
+
+    // Captions are sequential: only one can be on screen at a time, so an
+    // overlap silently hides one of them. Keep a frame of clear air between
+    // neighbours, the way Premiere's caption track does.
+    const gap = 1 / this.fps;
+    const minLen = MIN_CLIP_SEC;
+    const lowBound = limits.left > 0 ? limits.left + gap : 0;
+    const highBound = limits.right < Infinity ? limits.right - gap : Infinity;
 
     let newStart = initialStart;
     let newEnd = initialEnd;
 
     if (mode === 'move') {
-      newStart = Math.max(0, this.snapTime(initialStart + deltaSec, id));
+      newStart = this.snapTime(initialStart + deltaSec, id);
+      // Snapping runs first so it can still latch onto a neighbour's edge, then
+      // the clamp guarantees the result cannot cross it.
+      const latestStart = highBound === Infinity ? Infinity : highBound - initialDuration;
+      newStart = Math.min(Math.max(newStart, lowBound), Math.max(lowBound, latestStart));
+      newStart = Math.max(0, newStart);
       newEnd = newStart + initialDuration;
     } else if (mode === 'trim-left') {
-      newStart = Math.max(0, Math.min(initialEnd - 0.1, this.snapTime(initialStart + deltaSec, id)));
+      newStart = this.snapTime(initialStart + deltaSec, id);
+      newStart = Math.max(lowBound, Math.min(newStart, initialEnd - minLen));
+      newStart = Math.max(0, newStart);
       newEnd = initialEnd;
     } else if (mode === 'trim-right') {
-      newEnd = Math.max(initialStart + 0.1, this.snapTime(initialEnd + deltaSec, id));
+      newEnd = this.snapTime(initialEnd + deltaSec, id);
+      newEnd = Math.min(highBound, Math.max(newEnd, initialStart + minLen));
       newStart = initialStart;
     }
 
