@@ -70,9 +70,18 @@ class SubtitleManager {
       start: typeof sub.start === 'number' ? sub.start : this.timecodeToSeconds(sub.start),
       end: typeof sub.end === 'number' ? sub.end : this.timecodeToSeconds(sub.end),
       text: sub.text || '',
-      speaker: sub.speaker || ''
+      speaker: sub.speaker || '',
+      // Carried through from transcription so the review UI can point at the
+      // words the model was unsure about. Absent for hand-authored captions.
+      words: Array.isArray(sub.words) ? sub.words : undefined,
+      uncertain: Array.isArray(sub.uncertain) ? sub.uncertain : undefined
     })).sort((a, b) => a.start - b.start);
     this.notify();
+  }
+
+  /** Captions carrying at least one word the model was unsure about. */
+  uncertainSubtitles() {
+    return this.subtitles.filter(s => s.uncertain && s.uncertain.length);
   }
 
   addSubtitle(startSec, endSec, text = 'New Caption Line', speaker = '') {

@@ -1625,3 +1625,46 @@ svg[viewBox]:not(.icon):not(.brand-icon) {
   .brand-badge { display: none; }
   .aspect-label, .project-res { display: none; }
 }
+
+/* Vocabulary entry */
+.input-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 56px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  padding: var(--s2);
+}
+.input-textarea:focus { outline: none; border-color: var(--accent); }
+
+/* Captions the model was unsure about. Amber is the app's "needs your eye"
+   colour, matching the overlap marker on the timeline. */
+.caption-item.uncertain { border-left-color: var(--warn); }
+.caption-item.uncertain.active { border-left-color: var(--warn); }
+
+.caption-confidence {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--warn);
+  border: 1px solid rgba(224, 160, 50, 0.4);
+  border-radius: 3px;
+  padding: 0 4px;
+  flex-shrink: 0;
+  cursor: help;
+}
+
+#btnReviewFilter { flex-shrink: 0; }
+#btnReviewFilter.active {
+  background: rgba(224, 160, 50, 0.16);
+  border-color: var(--warn);
+  color: var(--warn);
+}

@@ -13,6 +13,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const FPS = 25;
 
+  // Matches LOW_CONFIDENCE in transcriber.py. Whisper-family probabilities
+  // cluster high, so the bar sits well above a coin flip.
+  const LOW_CONFIDENCE = 0.62;
+
   // Initialize Core Modules (25 FPS Default)
   const presetParser = new PresetParser();
   const subManager = new SubtitleManager(FPS);
@@ -459,6 +463,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     let isRestoringFocus = false;
+    let reviewOnly = false;
+
+    const reviewBtn = document.getElementById('btnReviewFilter');
+    reviewBtn.addEventListener('click', () => {
+      reviewOnly = !reviewOnly;
+      reviewBtn.classList.toggle('active', reviewOnly);
+      renderCaptionsList(subManager.getSubtitles(), subManager.selectedId);
+    });
+
+    /**
+     * The review control only appears once a transcription has actually reported
+     * confidence — hand-authored captions have none, and an engine that returns
+     * a constant 1.0 must not produce a review list built on nothing.
+     */
+    function updateReviewButton(subs) {
+      const count = subs.filter(s => s.uncertain && s.uncertain.length).length;
+      document.getElementById('reviewCount').textContent = count;
+      reviewBtn.classList.toggle('hidden', count === 0);
+      if (count === 0 && reviewOnly) {
+        reviewOnly = false;
+        reviewBtn.classList.remove('active');
+      }
+    }
 
     function renderCaptionsList(subs, selectedId) {
       // Preserve focus/caret across re-renders so typing is not interrupted.
@@ -471,17 +498,32 @@ document.addEventListener('DOMContentLoaded', async () => {
       } : null;
 
       listContainer.innerHTML = '';
+
+      // Resolve the review state before filtering on it. Done afterwards, a
+      // render that discovers the last uncertain caption has gone still filters
+      // the whole list away, leaving an empty panel and no visible control to
+      // get back.
+      updateReviewButton(subs);
+
       const filterTerm = searchInput.value.toLowerCase().trim();
-      const filtered = subs.filter(s =>
+      let filtered = subs.filter(s =>
         s.text.toLowerCase().includes(filterTerm) ||
         (s.speaker && s.speaker.toLowerCase().includes(filterTerm)));
 
+      if (reviewOnly) filtered = filtered.filter(s => s.uncertain && s.uncertain.length);
+
       countBadge.textContent = `${filtered.length} line${filtered.length === 1 ? '' : 's'}`;
+      updateReviewButton(subs);
 
       filtered.forEach((sub) => {
         const trueIndex = subs.indexOf(sub);
+        const uncertain = (sub.uncertain && sub.uncertain.length) ? sub.uncertain : null;
         const itemEl = document.createElement('div');
-        itemEl.className = `caption-item ${sub.id === selectedId ? 'active' : ''}`;
+        itemEl.className = [
+          'caption-item',
+          sub.id === selectedId ? 'active' : '',
+          uncertain ? 'uncertain' : ''
+        ].filter(Boolean).join(' ');
         itemEl.dataset.id = sub.id;
 
         const startTc = subManager.secondsToTimecode(sub.start, FPS);
@@ -495,6 +537,7 @@ document.addEventListener('DOMContentLoaded', async () => {
               <span>→</span>
               <input type="text" class="tc-input end-tc" value="${endTc}" title="Out Point (HH:MM:SS:FF)">
             </div>
+            ${uncertain ? `<span class="caption-confidence" title="Unsure about: ${escapeHtml(uncertain.join(', '))}">?${uncertain.length}</span>` : ''}
             <button class="caption-delete-btn" title="Delete Line">✕</button>
           </div>
           <textarea class="caption-textarea" placeholder="Caption text...">${escapeHtml(sub.text)}</textarea>
@@ -976,6 +1019,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (captions.length === 0) return 0;
 
+    // Tag each caption with the words the model was unsure about, so the review
+    // filter can send the operator straight to them.
+    const reported = !!(result.confidence && result.confidence.reported);
+    captions.forEach(cap => {
+      if (!reported || !Array.isArray(cap.words)) return;
+      cap.uncertain = cap.words
+        .filter(w => typeof w.confidence === 'number' && w.confidence < LOW_CONFIDENCE)
+        .map(w => w.text);
+    });
+
     if (opts.replace === false) {
       const existing = subManager.getSubtitles().map(s => ({ start: s.start, end: s.end, text: s.text }));
       subManager.setSubtitles([...existing, ...captions]);
@@ -1000,6 +1053,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     const progressText = document.getElementById('transcribeProgressText');
     const mediaInfo = document.getElementById('transcribeMediaInfo');
     const modelNote = document.getElementById('transcribeModelNote');
+
+    const audioSource = document.getElementById('transcribeAudioSource');
+    const audioFileInput = document.getElementById('transcribeAudioFile');
+    const audioFileName = document.getElementById('transcribeAudioFileName');
+    const vocabulary = document.getElementById('transcribeVocabulary');
+    let stemFile = null;
+
+    // The term list is worth keeping between jobs: a house style list and the
+    // client's product names rarely change from one deliverable to the next.
+    const VOCAB_KEY = 'transcriber.vocabulary';
+    try {
+      const saved = localStorage.getItem(VOCAB_KEY);
+      if (saved) vocabulary.value = saved;
+    } catch (e) { /* private mode */ }
+    vocabulary.addEventListener('change', () => {
+      try { localStorage.setItem(VOCAB_KEY, vocabulary.value); } catch (e) { /* ignore */ }
+    });
+
+    audioSource.addEventListener('change', () => {
+      document.getElementById('audioFileRow').classList.toggle('hidden', audioSource.value !== 'file');
+      if (audioSource.value === 'program') {
+        stemFile = null;
+        audioFileName.textContent = 'No file chosen';
+      }
+    });
+    document.getElementById('btnChooseAudioFile')
+      .addEventListener('click', () => audioFileInput.click());
+    audioFileInput.addEventListener('change', (e) => {
+      stemFile = e.target.files[0] || null;
+      audioFileName.textContent = stemFile ? stemFile.name : 'No file chosen';
+      e.target.value = '';
+    });
 
     const segChars = document.getElementById('segMaxChars');
     const segLines = document.getElementById('segMaxLines');
@@ -1142,8 +1227,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     startBtn.addEventListener('click', async () => {
       if (running) return;
-      if (!transcriber.currentFile) {
-        toast('Load a video or audio file before transcribing.', 'warn');
+      const haveAudio = transcriber.currentFile || (audioSource.value === 'file' && stemFile);
+      if (!haveAudio) {
+        toast(audioSource.value === 'file'
+          ? 'Choose the dialogue stem to transcribe.'
+          : 'Load a video or audio file before transcribing.', 'warn');
         return;
       }
 
@@ -1161,6 +1249,12 @@ document.addEventListener('DOMContentLoaded', async () => {
           language: document.getElementById('transcribeLanguage').value,
           task: document.getElementById('transcribeTask').value,
           vad: document.getElementById('transcribeVad').checked,
+          audioFile: audioSource.value === 'file' ? stemFile : null,
+          channel: document.getElementById('transcribeChannel').value,
+          normalise: document.getElementById('transcribeNormalise').checked,
+          suppressMusic: document.getElementById('transcribeSuppressMusic').checked,
+          carryContext: document.getElementById('transcribeCarryContext').checked,
+          vocabulary: vocabulary.value,
           align: ({ auto: 'auto', always: true, never: false })[
             document.getElementById('transcribeAlign').value],
           onProgress: (frac, msg) => {
@@ -1177,9 +1271,19 @@ document.addEventListener('DOMContentLoaded', async () => {
           progressText.textContent = 'No speech detected.';
         } else {
           const lang = result.language ? ` (${result.language})` : '';
-          const aligned = result.alignment_used ? ', word timings force-aligned' : '';
-          toast(`Transcribed into ${count} captions${lang}${aligned}. `
-            + 'Adjust the segmentation sliders to re-cut them instantly.', 'success', 8000);
+          const detail = [];
+          if (result.separated) detail.push('dialogue isolated');
+          if (result.alignment_used) detail.push('timings force-aligned');
+          if (result.vad_dropped) detail.push(`${result.vad_dropped} word(s) in silence removed`);
+          if (result.corrections && result.corrections.length) {
+            detail.push(`${result.corrections.length} vocabulary correction(s)`);
+          }
+          const conf = result.confidence || {};
+          if (conf.reported && conf.low_count) {
+            detail.push(`${conf.low_count} uncertain word(s) — use Review in the captions list`);
+          }
+          toast(`Transcribed into ${count} captions${lang}.`
+            + (detail.length ? `\n${detail.join('; ')}.` : ''), 'success', 10000);
           progressText.textContent = `Done — ${count} captions.`;
           modal.classList.add('hidden');
         }
