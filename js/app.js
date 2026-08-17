@@ -1083,8 +1083,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!probe.available) {
         note.className = 'export-note err';
         note.textContent =
-          'No transcription engine is installed. Run "pip install -r requirements.txt" '
-          + "in the Taylor's Transcriber folder, then relaunch.";
+          'No speech runtime is installed yet. Open Settings and use '
+          + '"Install recommended setup" — it installs into the app\'s own environment.';
         startBtn.disabled = true;
         return;
       }

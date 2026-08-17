@@ -1,53 +1,45 @@
 # Taylor's Transcriber — Python dependencies
 #
-#   pip install -r requirements.txt
+# YOU DO NOT NEED TO RUN pip YOURSELF.
 #
-# Desktop shell (required)
-pywebview>=4.4
+# Launch the app with ./run_subtitler.sh (macOS/Linux), run_subtitler.bat
+# (Windows), or by double-clicking "Taylor's Transcriber.command" on macOS.
+# On first run the app creates its own virtual environment at .venv inside this
+# folder and installs the two packages below into it. Nothing is installed into
+# your system Python — which also avoids the PEP 668
+# "externally-managed-environment" refusal you get from Homebrew and Debian
+# Python when installing globally.
+#
+# This file is kept as the canonical record of the base dependencies; the
+# authoritative list the bootstrapper uses is BASE_REQUIREMENTS in bootstrap.py.
 
-# Model downloads and install/remove management in Settings
+pywebview>=4.4
 huggingface-hub>=0.23.0
 
 
 # ============================================================================
-# Transcription runtimes — install at least one
+# Optional extras — install from the Settings panel, not from here
 # ============================================================================
 #
-# WHICH ONE MATTERS MORE THAN WHICH MODEL, especially on a Mac.
+# Speech runtimes and the word-timing aligner are installed on a button click in
+# Settings, into the app's own environment. They are listed here for reference
+# only; there is no need to uncomment anything.
 #
-# CTranslate2 (what faster-whisper uses) has no Metal backend, so on Apple
-# Silicon it runs on CPU cores only and leaves the GPU completely idle. The MLX
-# runtimes below use the Apple GPU and are dramatically faster on the same
-# hardware.
-
-# --- Apple Silicon (M1/M2/M3/M4) --------------------------------------------
-# Uncomment these on a Mac. Both use the GPU through Apple's MLX framework.
+# Apple Silicon (use the GPU):
+#   mlx-whisper>=0.4.0        Whisper family on the Apple GPU
+#   parakeet-mlx>=0.3.0       Fastest accurate English on Apple Silicon
+#   mlx-qwen3-asr>=0.1.0      Strongest multilingual accuracy
 #
-# mlx-whisper>=0.4.0        # Whisper family on the Apple GPU
-# parakeet-mlx>=0.3.0       # NVIDIA Parakeet — fastest accurate English option
-# mlx-qwen3-asr>=0.1.0      # Qwen3-ASR — strongest multilingual / noisy / accented
-
-# --- NVIDIA GPU or generic CPU ----------------------------------------------
-# faster-whisper>=1.0.0
-
-# --- Any Hugging Face checkpoint (Cohere Transcribe, Granite Speech, …) ------
-# Heavier install; needed for the accuracy-tier models that are not MLX ports.
+# NVIDIA GPU or generic CPU:
+#   faster-whisper>=1.0.0     No Metal backend, so CPU-only on a Mac
 #
-# transformers>=4.40.0
-# torch>=2.2.0
-
-
-# ============================================================================
-# Word-timing forced aligner (strongly recommended for captions)
-# ============================================================================
+# Any Hugging Face checkpoint (Cohere Transcribe, Granite Speech):
+#   transformers>=4.40.0
+#   torch>=2.2.0
 #
-# The most accurate speech models return text with no word timings at all, and
-# Whisper's own timings are inferred from cross-attention rather than measured.
-# The aligner pins each word to the audio, which is what caption timing depends
-# on. Install it from the Settings panel once these are present.
-#
-# torch>=2.2.0
-# torchaudio>=2.2.0
+# Word-timing forced aligner (recommended for captions):
+#   torch>=2.2.0
+#   torchaudio>=2.2.0
 
 
 # ============================================================================

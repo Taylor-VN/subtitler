@@ -30,6 +30,7 @@ import threading
 import traceback
 import uuid
 
+import bootstrap
 import model_registry as registry
 import engines as engines_mod
 
@@ -86,10 +87,29 @@ class InstallJob:
         }
 
 
+class RuntimeInstallJob:
+    def __init__(self, job_id, runtime_id, label):
+        self.id = job_id
+        self.runtime_id = runtime_id
+        self.label = label
+        self.state = 'installing'
+        self.message = f'Installing {label}…'
+        self.error = None
+        self.lines = []
+
+    def snapshot(self):
+        return {
+            'ok': True, 'job_id': self.id, 'runtime_id': self.runtime_id,
+            'state': self.state, 'message': self.message, 'error': self.error,
+            'lines': self.lines[-6:],
+        }
+
+
 class Transcriber:
     def __init__(self):
         self.jobs = {}
         self.installs = {}
+        self.runtime_jobs = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -128,6 +148,10 @@ class Transcriber:
             'recommended': registry.recommended('accuracy'),
             'free_disk': registry.free_disk_bytes(),
             'cache_dir': registry.hf_cache_dir(),
+            'runtimes': registry.list_runtimes(),
+            'can_install_runtimes': bootstrap.can_install_runtimes(),
+            'venv_dir': bootstrap.VENV_DIR,
+            'in_venv': bootstrap.in_project_venv(),
         }
 
     def list_models(self):
@@ -153,7 +177,8 @@ class Transcriber:
                 import huggingface_hub  # noqa: F401
             except ImportError:
                 return {'ok': False,
-                        'error': 'huggingface-hub is not installed. Run: pip install huggingface-hub'}
+                        'error': ('huggingface-hub is missing from the app environment. '
+                                  'Relaunch with run_subtitler.sh to repair it.')}
 
             job_id = uuid.uuid4().hex
             job = InstallJob(job_id, model_id, repo)
@@ -237,6 +262,82 @@ class Transcriber:
             return {'ok': False, 'error': str(e)}
 
     # ------------------------------------------------------------------
+    # Optional runtime installation (into the app's own venv)
+    # ------------------------------------------------------------------
+    def list_runtimes(self):
+        return {'ok': True, 'runtimes': registry.list_runtimes(),
+                'can_install': bootstrap.can_install_runtimes(),
+                'recommended': registry.recommended_runtimes()}
+
+    def install_runtime(self, runtime_id):
+        try:
+            if not bootstrap.can_install_runtimes():
+                return {'ok': False,
+                        'error': ('Runtimes can only be installed when the app is running in '
+                                  'its own virtual environment. Relaunch with run_subtitler.sh.')}
+
+            if runtime_id == '__recommended__':
+                ids = registry.recommended_runtimes()
+                pending = [i for i in ids
+                           if not registry.module_available(registry.RUNTIMES[i]['module'])]
+                if not pending:
+                    return {'ok': False, 'error': 'Everything recommended is already installed.'}
+                packages = []
+                for i in pending:
+                    packages += registry.RUNTIMES[i]['packages']
+                label = 'recommended runtimes'
+            else:
+                runtime = registry.get_runtime(runtime_id)
+                if not runtime:
+                    return {'ok': False, 'error': f'Unknown runtime "{runtime_id}".'}
+                if not registry.runtime_supported(runtime):
+                    return {'ok': False,
+                            'error': f'{runtime["label"]} is not available for {registry.platform_tag()}.'}
+                packages = runtime['packages']
+                label = runtime['label']
+
+            job_id = uuid.uuid4().hex
+            job = RuntimeInstallJob(job_id, runtime_id, label)
+            with self._lock:
+                self.runtime_jobs[job_id] = job
+
+            t = threading.Thread(target=self._run_runtime_install,
+                                 args=(job, packages), daemon=True)
+            t.start()
+            return {'ok': True, 'job_id': job_id}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+
+    def _run_runtime_install(self, job, packages):
+        try:
+            def on_line(line):
+                job.lines.append(line)
+                del job.lines[:-40]
+                # pip's own wording is the most informative progress we have.
+                if line.startswith(('Collecting', 'Downloading', 'Installing',
+                                    'Using cached', 'Building')):
+                    job.message = line[:120]
+
+            ok, tail = bootstrap.install_packages_streaming(packages, on_line=on_line)
+            if ok:
+                job.state = 'done'
+                job.message = f'{job.label} installed. Restart to pick it up.'
+            else:
+                job.state = 'error'
+                job.error = 'pip install failed:\n' + '\n'.join(tail[-6:])
+                job.message = 'Install failed.'
+        except Exception as e:
+            job.state = 'error'
+            job.error = str(e)
+            job.message = 'Install failed.'
+
+    def runtime_install_status(self, job_id):
+        job = self.runtime_jobs.get(job_id)
+        if not job:
+            return {'ok': False, 'error': 'Unknown runtime install job.'}
+        return job.snapshot()
+
+    # ------------------------------------------------------------------
     # Audio upload
     # ------------------------------------------------------------------
     def begin(self, options):
@@ -253,8 +354,9 @@ class Transcriber:
                     pkg = registry.ENGINE_PACKAGES.get(model['engine'], model['engine'])
                     return {'ok': False,
                             'error': (f'{model["label"]} needs the "{pkg}" runtime, which is not '
-                                      f'installed.\n\nInstall it with:\n    pip install {pkg}\n\n'
-                                      'then relaunch Taylor\'s Transcriber.')}
+                                      'installed.\n\nInstall it from Settings \u2192 Speech Runtimes, '
+                                      'then restart the app.'),
+                            'needs_runtime': model['engine']}
                 if not registry.is_installed(model['repo']):
                     return {'ok': False,
                             'error': (f'{model["label"]} has not been downloaded yet. '

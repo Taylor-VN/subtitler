@@ -215,6 +215,133 @@ def is_apple_silicon():
     return platform.system() == 'Darwin' and platform.machine() in ('arm64', 'aarch64')
 
 
+def has_nvidia():
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Optional runtimes, installable into the app's own venv from Settings
+# ---------------------------------------------------------------------------
+#
+# Each entry is a pip-installable runtime plus the module that proves it landed.
+# `platforms` restricts what is offered: the MLX runtimes only exist for Apple
+# Silicon, so showing them elsewhere would just produce install failures.
+
+RUNTIMES = {
+    ENGINE_MLX_WHISPER: {
+        'id': ENGINE_MLX_WHISPER,
+        'label': 'MLX Whisper (Apple GPU)',
+        'packages': ['mlx-whisper>=0.4.0'],
+        'module': 'mlx_whisper',
+        'platforms': ['darwin-arm64'],
+        'size_mb': 90,
+        'notes': 'Runs the Whisper family on the Apple GPU instead of the CPU.',
+    },
+    ENGINE_MLX_PARAKEET: {
+        'id': ENGINE_MLX_PARAKEET,
+        'label': 'Parakeet MLX (Apple GPU)',
+        'packages': ['parakeet-mlx>=0.3.0'],
+        'module': 'parakeet_mlx',
+        'platforms': ['darwin-arm64'],
+        'size_mb': 90,
+        'notes': 'Fastest accurate English option on Apple Silicon.',
+    },
+    ENGINE_MLX_QWEN3: {
+        'id': ENGINE_MLX_QWEN3,
+        'label': 'Qwen3-ASR MLX (Apple GPU)',
+        'packages': ['mlx-qwen3-asr>=0.1.0'],
+        'module': 'mlx_qwen3_asr',
+        'platforms': ['darwin-arm64'],
+        'size_mb': 90,
+        'notes': 'Strongest multilingual accuracy, on the Apple GPU.',
+    },
+    ENGINE_TRANSFORMERS: {
+        'id': ENGINE_TRANSFORMERS,
+        'label': 'Transformers + PyTorch',
+        'packages': ['transformers>=4.40.0', 'torch>=2.2.0', 'torchaudio>=2.2.0'],
+        'module': 'transformers',
+        'platforms': ['any'],
+        'size_mb': 2500,
+        'notes': ('Needed for Cohere Transcribe and Granite Speech, and it also '
+                  'provides the word-timing aligner. Large download.'),
+    },
+    ENGINE_FASTER_WHISPER: {
+        'id': ENGINE_FASTER_WHISPER,
+        'label': 'faster-whisper (CTranslate2)',
+        'packages': ['faster-whisper>=1.0.0'],
+        'module': 'faster_whisper',
+        'platforms': ['any'],
+        'size_mb': 150,
+        'notes': ('For NVIDIA GPUs and generic CPU. No Metal backend, so on '
+                  'Apple Silicon this stays on the CPU.'),
+    },
+    'aligner-torch': {
+        'id': 'aligner-torch',
+        'label': 'PyTorch + torchaudio (word-timing aligner)',
+        'packages': ['torch>=2.2.0', 'torchaudio>=2.2.0'],
+        'module': 'torchaudio',
+        'platforms': ['any'],
+        'size_mb': 2200,
+        'notes': ('Powers the forced aligner, which measures per-word times '
+                  'instead of inferring them. Strongly recommended for captions.'),
+    },
+}
+
+
+def platform_tag():
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == 'darwin' and machine in ('arm64', 'aarch64'):
+        return 'darwin-arm64'
+    return f'{system}-{machine}'
+
+
+def runtime_supported(runtime):
+    plats = runtime.get('platforms') or ['any']
+    return 'any' in plats or platform_tag() in plats
+
+
+def module_available(module_name):
+    try:
+        __import__(module_name)
+        return True
+    except Exception:
+        return False
+
+
+def list_runtimes():
+    """Installable runtimes for this machine, with live installed state."""
+    out = []
+    for rt in RUNTIMES.values():
+        if not runtime_supported(rt):
+            continue
+        out.append(dict(rt,
+                        installed=module_available(rt['module']),
+                        recommended=rt['id'] in recommended_runtimes()))
+    return out
+
+
+def recommended_runtimes():
+    """
+    The set worth having on this machine.
+
+    On Apple Silicon that means the GPU runtimes — faster-whisper would work but
+    would leave the GPU idle — plus torch for the aligner, since without it the
+    accuracy-tier models cannot produce caption timings at all.
+    """
+    if is_apple_silicon():
+        return [ENGINE_MLX_WHISPER, ENGINE_MLX_PARAKEET, 'aligner-torch']
+    return [ENGINE_FASTER_WHISPER, 'aligner-torch']
+
+
+def get_runtime(runtime_id):
+    return RUNTIMES.get(runtime_id)
+
+
 def engine_available(engine):
     """Whether the runtime package for an engine is importable."""
     module = {

@@ -1501,3 +1501,23 @@ kbd {
   .header-controls { gap: 8px; }
   .header-controls .btn { padding: 6px 9px; font-size: 11px; }
 }
+
+/* Runtime rows in Settings */
+.runtime-ok {
+  font-size: 11px;
+  font-weight: 600;
+  color: #35c46a;
+  padding: 4px 4px;
+}
+
+/* pip gives no total, so show motion rather than a false percentage */
+.progress-fill.indeterminate {
+  width: 35% !important;
+  animation: indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes indeterminate {
+  0%   { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+
+#btnInstallRecommended.hidden { display: none; }

@@ -72,7 +72,7 @@ class MlxWhisperEngine(BaseEngine):
         try:
             import mlx_whisper  # noqa: F401
         except ImportError:
-            raise EngineError('mlx-whisper is not installed. Install it with: pip install mlx-whisper')
+            raise EngineError('The MLX Whisper runtime is not installed. Install it from Settings → Speech Runtimes.')
         self.handle = True
 
     def transcribe(self, wav_path, options, progress_cb=None):
@@ -119,7 +119,7 @@ class ParakeetMlxEngine(BaseEngine):
         try:
             from parakeet_mlx import from_pretrained
         except ImportError:
-            raise EngineError('parakeet-mlx is not installed. Install it with: pip install parakeet-mlx')
+            raise EngineError('The Parakeet MLX runtime is not installed. Install it from Settings → Speech Runtimes.')
         if progress_cb:
             progress_cb(0.05, f'Loading {self.model["label"]}…')
         self.handle = from_pretrained(self.repo)
@@ -162,7 +162,7 @@ class Qwen3AsrMlxEngine(BaseEngine):
         try:
             import mlx_qwen3_asr  # noqa: F401
         except ImportError:
-            raise EngineError('mlx-qwen3-asr is not installed. Install it with: pip install mlx-qwen3-asr')
+            raise EngineError('The Qwen3-ASR MLX runtime is not installed. Install it from Settings → Speech Runtimes.')
         self.handle = True
 
     def transcribe(self, wav_path, options, progress_cb=None):
@@ -210,8 +210,8 @@ class TransformersEngine(BaseEngine):
         try:
             from transformers import pipeline
         except ImportError:
-            raise EngineError(
-                'transformers is not installed. Install it with: pip install "transformers>=4.40" torch')
+            raise EngineError('The Transformers + PyTorch runtime is not installed. '
+                              'Install it from Settings → Speech Runtimes.')
         device = self._device()
         if progress_cb:
             progress_cb(0.05, f'Loading {self.model["label"]} on {device.upper()}…')
@@ -289,7 +289,7 @@ class FasterWhisperEngine(BaseEngine):
         try:
             from faster_whisper import WhisperModel
         except ImportError:
-            raise EngineError('faster-whisper is not installed. Install it with: pip install faster-whisper')
+            raise EngineError('The faster-whisper runtime is not installed. Install it from Settings → Speech Runtimes.')
         device = self._device()
         compute = self.options.get('compute_type') or ('float16' if device == 'cuda' else 'int8')
         if progress_cb:

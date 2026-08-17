@@ -7,14 +7,26 @@ burned-in text.
 
 ## Running it
 
-```bash
-pip install -r requirements.txt
-./run_subtitler.sh          # or: python3 app.py
-```
+There is nothing to install first.
 
-The app opens in its own desktop window. Launching it this way (rather than
-opening `index.html` in a browser) is what enables the ProRes export and the
-AI transcription — both need the Python backend.
+| Platform | Launch |
+| --- | --- |
+| macOS | double-click **Taylor's Transcriber.command**, or `./run_subtitler.sh` |
+| Linux | `./run_subtitler.sh` |
+| Windows | double-click **run_subtitler.bat** |
+
+On the first run the app creates its own virtual environment at `.venv` inside
+this folder and installs its two base dependencies there. Later runs skip
+straight to launching. **Nothing is installed into your system Python** — which
+also sidesteps the `externally-managed-environment` refusal (PEP 668) that
+Homebrew and Debian Python give when you pip-install globally.
+
+Everything heavier — the speech runtimes and the word-timing aligner — installs
+on a button click in **Settings**, into that same private environment. You never
+need a terminal.
+
+Only Python 3.9+ is required on the machine. If it is missing, the launcher tells
+you how to get it.
 
 ### ffmpeg (for the ProRes export)
 
@@ -57,15 +69,18 @@ On Apple Silicon this matters more than the model choice. CTranslate2 — what
 `faster-whisper` is built on — has **no Metal backend**, so it runs on CPU cores
 only and leaves the GPU idle. The MLX runtimes use the Apple GPU:
 
-| Runtime | Install | Use it for |
+| Runtime | Download | Use it for |
 | --- | --- | --- |
-| `mlx-whisper` | `pip install mlx-whisper` | Whisper family, Apple GPU |
-| `parakeet-mlx` | `pip install parakeet-mlx` | Fastest accurate English, Apple GPU |
-| `mlx-qwen3-asr` | `pip install mlx-qwen3-asr` | Strongest multilingual, Apple GPU |
-| `transformers` + `torch` | `pip install transformers torch` | Cohere Transcribe, Granite Speech |
-| `faster-whisper` | `pip install faster-whisper` | NVIDIA GPUs, generic CPU |
+| MLX Whisper | 90 MB | Whisper family, Apple GPU |
+| Parakeet MLX | 90 MB | Fastest accurate English, Apple GPU |
+| Qwen3-ASR MLX | 90 MB | Strongest multilingual, Apple GPU |
+| Transformers + PyTorch | 2.5 GB | Cohere Transcribe, Granite Speech |
+| faster-whisper | 150 MB | NVIDIA GPUs, generic CPU |
 
-Settings warns you if the only runtime present is the CPU-bound one.
+Install these from **Settings → Speech Runtimes**. "Install recommended setup"
+picks the right set for the machine it is running on — the GPU runtimes plus the
+aligner on Apple Silicon. Settings also warns you if the only runtime present is
+the CPU-bound one, and only offers runtimes that exist for your platform.
 
 ### Choosing a model
 
@@ -92,7 +107,8 @@ they drift.
 So recognition and timing are decoupled. A CTC **forced aligner** (`MMS`, 1000+
 languages) pins each word to the audio after recognition. That makes the
 accuracy-tier models usable for subtitling at all, and tightens Whisper's
-timings too. Install it from Settings; the Transcribe dialog lets you choose
+timings too. Install it from **Settings → Word Timing Aligner** (it needs PyTorch, which
+Settings installs for you). The Transcribe dialog then lets you choose
 *automatic* (align when the model needs it), *always*, or *never*.
 
 ### Segmentation
@@ -147,6 +163,7 @@ raw-text scan, and understands Premiere's colour encodings (`#rgb`, `#rrggbb`,
 ## Project layout
 
 ```
+bootstrap.py              creates/enters the app's private venv, installs runtimes
 app.py                    desktop shell, local static server, export + transcribe bridge
 transcriber.py            job lifecycle, model install/removal, alignment orchestration
 js/videoPlayer.js         transport + the canvas renderer (shared by preview and export)
@@ -154,7 +171,7 @@ js/exporter.js            alpha frame rendering, ffmpeg handoff, PNG-sequence fa
 js/transcription.js       audio decode/resample/WAV, chunked upload, progress polling
 js/settings.js            model manager UI (install/remove, runtime warnings)
 js/captionSegmenter.js    word timings -> broadcast-style captions
-model_registry.py         model metadata, install-state detection
+model_registry.py         model + runtime metadata, install-state detection
 engines.py                MLX/transformers/CTranslate2 adapters + forced aligner
 js/subtitleManager.js     caption store, timecodes, SRT/VTT/XML
 js/timeline.js            ruler, waveform, draggable clips, snapping
