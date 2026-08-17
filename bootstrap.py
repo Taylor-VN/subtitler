@@ -1,10 +1,9 @@
 """
 Environment bootstrap.
 
-The app owns its own virtual environment at `.venv` inside the project folder.
-On launch it creates that venv if missing, installs the base dependencies into
-it, and re-executes itself with the venv's interpreter. Nothing is ever
-installed into the user's system Python.
+The app owns its own virtual environment. On launch it creates that venv if
+missing, installs the base dependencies into it, and re-executes itself with the
+venv's interpreter. Nothing is ever installed into the user's system Python.
 
 Why this exists rather than a README line telling people to run pip:
 
@@ -16,6 +15,15 @@ Why this exists rather than a README line telling people to run pip:
     project on the machine.
   * Owning the venv also means the app can install its own *optional* runtimes
     later from the Settings panel, so nobody needs a terminal at all.
+
+Where the venv lives matters as much as owning it. It goes in the per-user
+application-support directory on the boot volume, keyed by a hash of the project
+path — not next to the project. macOS refuses to dlopen native extensions from
+external and network volumes ("library load disallowed by system policy"), so an
+environment beside a project on /Volumes/… cannot load PyObjC and pywebview ends
+up with no GUI backend at all. Editing projects live on external drives as a
+matter of course, so the environment has to sit somewhere the system will execute
+from. Set TRANSCRIBER_VENV to override the location.
 
 This module deliberately uses only the standard library — it has to run before
 anything is installed.
@@ -29,19 +37,82 @@ import sys
 import venv
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-VENV_DIR = os.path.join(PROJECT_DIR, '.venv')
-STAMP_FILE = os.path.join(VENV_DIR, '.deps-stamp')
+LEGACY_VENV_DIR = os.path.join(PROJECT_DIR, '.venv')
 GUARD_ENV = 'TRANSCRIBER_BOOTSTRAPPED'
+VENV_OVERRIDE_ENV = 'TRANSCRIBER_VENV'
+APP_DIR_NAME = 'TaylorsTranscriber'
 
 MIN_PYTHON = (3, 9)
 
-# Kept small on purpose: this is what must be present for the window to open at
-# all. Everything heavier (speech runtimes, torch) is optional and installed on
-# demand from Settings.
-BASE_REQUIREMENTS = [
-    'pywebview>=4.4',
-    'huggingface-hub>=0.23.0',
-]
+
+def app_support_dir():
+    """
+    Per-user data directory on the *boot* volume.
+
+    This matters more than it looks. macOS refuses to dlopen native extensions
+    from external and network volumes — "library load disallowed by system
+    policy" — so a venv sitting next to a project on /Volumes/… cannot load
+    pyobjc, and pywebview then has no GUI backend at all. Editing projects live
+    on big external drives all the time, so the environment goes somewhere the
+    system will actually execute from.
+    """
+    home = os.path.expanduser('~')
+    if sys.platform == 'darwin':
+        base = os.path.join(home, 'Library', 'Application Support', APP_DIR_NAME)
+    elif os.name == 'nt':
+        base = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.join(home, 'AppData', 'Local'),
+                            APP_DIR_NAME)
+    else:
+        base = os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.join(home, '.local', 'share'),
+                            'taylors-transcriber')
+    return base
+
+
+def _project_key():
+    """Short stable id for this checkout, so several copies never share a venv."""
+    try:
+        real = os.path.realpath(PROJECT_DIR)
+    except OSError:
+        real = PROJECT_DIR
+    return hashlib.sha256(real.encode('utf-8')).hexdigest()[:10]
+
+
+def resolve_venv_dir():
+    override = os.environ.get(VENV_OVERRIDE_ENV)
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    try:
+        base = app_support_dir()
+        os.makedirs(base, exist_ok=True)
+        return os.path.join(base, f'venv-{_project_key()}')
+    except OSError:
+        import tempfile
+        return os.path.join(tempfile.gettempdir(), f'{APP_DIR_NAME}-venv-{_project_key()}')
+
+
+VENV_DIR = resolve_venv_dir()
+STAMP_FILE = os.path.join(VENV_DIR, '.deps-stamp')
+
+
+def base_requirements():
+    """
+    Minimum needed for the window to open. Everything heavier (speech runtimes,
+    torch) is optional and installed on demand from Settings.
+
+    pywebview needs a platform GUI binding, and the bare package does not always
+    pull one. Asking for the right extra explicitly avoids the "you must have
+    either PyObjC or Qt installed" failure at startup.
+    """
+    reqs = ['huggingface-hub>=0.23.0']
+    if sys.platform == 'darwin':
+        reqs.insert(0, 'pywebview[cocoa]>=4.4')
+    else:
+        reqs.insert(0, 'pywebview>=4.4')
+    return reqs
+
+
+# Kept for callers/tests that reference it directly.
+BASE_REQUIREMENTS = base_requirements()
 
 
 def venv_python(venv_dir=VENV_DIR):
@@ -75,6 +146,32 @@ def requirements_stamp():
     h.update(('\n'.join(BASE_REQUIREMENTS)).encode())
     h.update(platform.python_version().encode())
     return h.hexdigest()
+
+
+def legacy_venv_is_stale():
+    """
+    True when an old in-project .venv exists and is not the one we now use.
+
+    Earlier versions created the environment next to the project. Those copies
+    are the ones that fail to load native libraries on external volumes, so it
+    is worth telling the user they are dead weight.
+    """
+    if not os.path.isdir(LEGACY_VENV_DIR):
+        return False
+    try:
+        return not os.path.samefile(LEGACY_VENV_DIR, VENV_DIR)
+    except OSError:
+        return True  # VENV_DIR does not exist yet, so the legacy one is unused
+
+
+def on_external_volume(path=PROJECT_DIR):
+    """Best-effort: is this path on a volume other than the boot volume?"""
+    if sys.platform != 'darwin':
+        return False
+    try:
+        return os.path.realpath(path).startswith('/Volumes/')
+    except OSError:
+        return False
 
 
 def stamp_is_current():
@@ -116,6 +213,7 @@ def pip_install(args, python=None, quiet=True):
 
 def install_base_requirements():
     _log('Installing base dependencies (one-time, ~20 MB)…')
+    globals()['BASE_REQUIREMENTS'] = base_requirements()
     # Upgrading pip first avoids a class of resolver and wheel-format failures
     # on the pip that ships inside older venvs.
     subprocess.run([venv_python(), '-m', 'pip', 'install', '-q', '--upgrade',
@@ -150,6 +248,14 @@ def ensure_environment(argv=None):
         os.environ[GUARD_ENV] = '1'
         return
 
+    if on_external_volume() and not os.environ.get(VENV_OVERRIDE_ENV):
+        _log(f'Project is on an external volume; keeping the environment at {VENV_DIR}')
+        _log('(macOS will not load native libraries from /Volumes.)')
+
+    if legacy_venv_is_stale():
+        _log(f'Note: the old in-project environment at {LEGACY_VENV_DIR} is no longer '
+             'used and can be deleted.')
+
     if not os.path.isfile(venv_python()):
         try:
             create_venv()
@@ -173,6 +279,58 @@ def ensure_environment(argv=None):
         # Windows has no exec that replaces the process cleanly for GUI apps.
         sys.exit(subprocess.run(args, env=env, cwd=PROJECT_DIR).returncode)
     os.execve(args[0], args, env)
+
+
+def diagnose_gui_backend():
+    """
+    Work out whether pywebview can actually open a window, and why not if it
+    cannot. Returns (ok, message).
+
+    pywebview raises a single generic error covering every reason its GUI
+    backend is unavailable, which is unhelpful when the real cause is macOS
+    refusing to load a library from an external volume. This separates the
+    common causes so the user gets an answer rather than a stack trace.
+    """
+    try:
+        import webview  # noqa: F401
+    except ImportError:
+        return False, 'pywebview is not installed in the app environment.'
+
+    if sys.platform == 'darwin':
+        try:
+            import objc  # noqa: F401
+            import WebKit  # noqa: F401
+            return True, 'Cocoa backend available.'
+        except ImportError as e:
+            return False, (f'PyObjC is missing or incomplete ({e}). '
+                           'Delete the app environment and relaunch to reinstall it.')
+        except Exception as e:
+            msg = str(e)
+            if 'not valid for use in process' in msg or 'disallowed by system policy' in msg:
+                return False, (
+                    'macOS blocked loading PyObjC from this location.\n'
+                    'This happens when the environment sits on an external or network '
+                    f'volume. The environment is at:\n  {VENV_DIR}\n'
+                    'If that path is on an external drive, set TRANSCRIBER_VENV to a '
+                    'folder on your internal disk and relaunch.')
+            return False, f'The Cocoa backend failed to load: {msg}'
+
+    if os.name == 'nt':
+        return True, 'EdgeChromium backend expected.'
+
+    try:
+        import gi  # noqa: F401
+        return True, 'GTK backend available.'
+    except Exception:
+        pass
+    try:
+        import qtpy  # noqa: F401
+        return True, 'Qt backend available.'
+    except Exception:
+        pass
+    return False, ('No GUI backend found. Install GTK bindings '
+                   '(e.g. "sudo apt install python3-gi gir1.2-webkit2-4.1") '
+                   'or Qt bindings, or use the browser fallback.')
 
 
 # ---------------------------------------------------------------------------

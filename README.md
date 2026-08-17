@@ -11,15 +11,15 @@ There is nothing to install first.
 
 | Platform | Launch |
 | --- | --- |
-| macOS | double-click **Taylor's Transcriber.command**, or `./run_subtitler.sh` |
+| macOS | `./run_subtitler.sh`, or double-click **Taylor's Transcriber.command** |
 | Linux | `./run_subtitler.sh` |
 | Windows | double-click **run_subtitler.bat** |
 
-On the first run the app creates its own virtual environment at `.venv` inside
-this folder and installs its two base dependencies there. Later runs skip
-straight to launching. **Nothing is installed into your system Python** — which
-also sidesteps the `externally-managed-environment` refusal (PEP 668) that
-Homebrew and Debian Python give when you pip-install globally.
+On the first run the app creates its own virtual environment and installs its
+base dependencies there. Later runs skip straight to launching. **Nothing is
+installed into your system Python** — which also sidesteps the
+`externally-managed-environment` refusal (PEP 668) that Homebrew and Debian
+Python give when you pip-install globally.
 
 Everything heavier — the speech runtimes and the word-timing aligner — installs
 on a button click in **Settings**, into that same private environment. You never
@@ -27,6 +27,51 @@ need a terminal.
 
 Only Python 3.9+ is required on the machine. If it is missing, the launcher tells
 you how to get it.
+
+### Where the environment lives
+
+Not next to the project. It goes in your per-user application-support directory
+on the **boot volume**, keyed by a hash of the project path:
+
+| Platform | Location |
+| --- | --- |
+| macOS | `~/Library/Application Support/TaylorsTranscriber/venv-<hash>` |
+| Linux | `~/.local/share/taylors-transcriber/venv-<hash>` |
+| Windows | `%LOCALAPPDATA%\TaylorsTranscriber\venv-<hash>` |
+
+This is deliberate, not tidiness. **macOS refuses to load native libraries from
+external and network volumes** — you get `library load disallowed by system
+policy`. Editing projects normally live on big external drives, and an
+environment sitting beside one cannot load PyObjC, which leaves pywebview with no
+GUI backend and the app unable to open a window at all. Keeping the environment
+on the boot volume avoids that entirely, while the project itself can live
+wherever you like.
+
+Override it with `TRANSCRIBER_VENV=/path/to/env` if you need to. If you have an
+old in-project `.venv` from an earlier version, the launcher will tell you it is
+no longer used and can be deleted.
+
+### If the window will not open
+
+The app never dies with a stack trace over this. If no native GUI backend can be
+loaded it prints the reason and **falls back to your default browser**, serving
+the interface from `127.0.0.1`. Exporting and transcription still work in that
+mode — the backend is exposed over a localhost bridge that requires a
+per-launch token — the only difference is that text exports download through the
+browser instead of using a native save dialog.
+
+Force that mode with `./run_subtitler.sh --browser`.
+
+### macOS: "cannot be opened because it is from an unidentified developer"
+
+Gatekeeper blocks double-clicking an unsigned `.command` file. Either:
+
+- **right-click** the file → **Open** → **Open** (the sanctioned one-time
+  override), or
+- run it from Terminal with `./run_subtitler.sh`, which is not subject to that
+  check, or
+- clear the quarantine flag on your own copy:
+  `xattr -d com.apple.quarantine "Taylor's Transcriber.command"`
 
 ### ffmpeg (for the ProRes export)
 
@@ -141,6 +186,17 @@ tag name, by `<Parameter Name="…">` node, and by attribute, falling back to a
 raw-text scan, and understands Premiere's colour encodings (`#rgb`, `#rrggbb`,
 `#aarrggbb`, `0x…`, `r,g,b`, normalised floats, packed ARGB).
 
+## Interface
+
+The toolbar groups its actions into two menus — **Import** (media, subtitles,
+Premiere presets) and **Export** (ProRes + alpha, SRT, VTT, sequence XML, style
+preset) — with Transcribe, Settings and Help alongside. Every action keeps its
+keyboard shortcut.
+
+One accent colour marks anything actionable. Cyan is reserved for the timeline,
+so cyan always means "time": the playhead, the waveform and every timecode
+readout. Green, amber and red appear only as status, never as button fills.
+
 ## Keyboard shortcuts
 
 | Key | Action |
@@ -163,13 +219,17 @@ raw-text scan, and understands Premiere's colour encodings (`#rgb`, `#rrggbb`,
 ## Project layout
 
 ```
-bootstrap.py              creates/enters the app's private venv, installs runtimes
-app.py                    desktop shell, local static server, export + transcribe bridge
+bootstrap.py              creates/enters the app's private venv, installs runtimes,
+                          diagnoses GUI backends
+app.py                    desktop shell, local static server, browser fallback,
+                          token-authenticated API bridge
 transcriber.py            job lifecycle, model install/removal, alignment orchestration
 js/videoPlayer.js         transport + the canvas renderer (shared by preview and export)
 js/exporter.js            alpha frame rendering, ffmpeg handoff, PNG-sequence fallback
 js/transcription.js       audio decode/resample/WAV, chunked upload, progress polling
-js/settings.js            model manager UI (install/remove, runtime warnings)
+js/bridge.js              picks the backend transport (native shell or HTTP bridge)
+js/menu.js                header dropdown menus
+js/settings.js            model + runtime manager UI (install/remove, warnings)
 js/captionSegmenter.js    word timings -> broadcast-style captions
 model_registry.py         model + runtime metadata, install-state detection
 engines.py                MLX/transformers/CTranslate2 adapters + forced aligner

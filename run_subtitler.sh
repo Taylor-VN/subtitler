@@ -2,8 +2,12 @@
 # Launcher for Taylor's Transcriber.
 #
 # There is nothing to install first. On the first run the app creates its own
-# virtual environment at .venv inside this folder and installs what it needs
-# there — never into your system Python. Later runs skip straight to launching.
+# virtual environment (in your application-support directory, not next to the
+# project — macOS will not load native libraries from external volumes) and
+# installs what it needs there, never into your system Python. Later runs skip
+# straight to launching.
+#
+# Pass --browser to skip the native window and use your default browser.
 set -e
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR"

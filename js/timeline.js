@@ -3,6 +3,9 @@
  * Interactive Multi-track Timeline with Drag, Trim Handles, Snapping, 25 FPS Ruler, and Waveform
  */
 
+const TRACK_HEADER_WIDTH = 90;
+const RULER_HEIGHT = 24;
+
 class TimelineController {
   constructor(rulerCanvas, waveformCanvas, subtitleTrackContainer, playheadElement, subtitleManager, videoPlayer, fps = 25) {
     this.rulerCanvas = rulerCanvas;
@@ -85,8 +88,27 @@ class TimelineController {
       document.body.style.cursor = 'default';
     });
 
-    window.addEventListener('resize', () => this.resizeAndDraw());
+    window.addEventListener('resize', () => this.scheduleResize());
+
+    // A panel can change width without a window resize, and CSS scaling of a
+    // fixed-size canvas is exactly what distorted the ruler, so watch the
+    // element itself.
+    const container = document.getElementById('timelineContainer');
+    if (container && window.ResizeObserver) {
+      this.resizeObserver = new ResizeObserver(() => this.scheduleResize());
+      this.resizeObserver.observe(container);
+    }
     setTimeout(() => this.resizeAndDraw(), 100);
+  }
+
+  /** Coalesces resize bursts into one redraw on the next frame. */
+  scheduleResize() {
+    if (this.resizePending) return;
+    this.resizePending = true;
+    requestAnimationFrame(() => {
+      this.resizePending = false;
+      this.resizeAndDraw();
+    });
   }
 
   setZoom(pxPerSec) {
@@ -105,18 +127,72 @@ class TimelineController {
     return Math.max(30, media, lastCaptionEnd + 5);
   }
 
+  /**
+   * Measures the space available to the timeline.
+   *
+   * The content is at least as wide as the visible area, so a short project at
+   * low zoom fills the panel instead of leaving the canvases to be stretched by
+   * CSS — which was distorting the ruler timecodes and pulling them out of
+   * alignment with the (absolutely positioned, unstretched) clips.
+   */
+  measure() {
+    const container = document.getElementById('timelineContainer');
+    const headerEl = this.rulerCanvas.closest('.timeline-ruler-wrapper')
+      ? this.rulerCanvas.closest('.timeline-ruler-wrapper').querySelector('.track-header')
+      : null;
+
+    const headerWidth = headerEl ? headerEl.getBoundingClientRect().width : TRACK_HEADER_WIDTH;
+    const visible = container ? container.clientWidth : 0;
+    const available = Math.max(200, visible - headerWidth);
+    const needed = this.duration * this.zoomLevel;
+
+    const waveTrack = this.waveformCanvas.parentElement;
+    const waveHeight = waveTrack ? Math.max(24, Math.round(waveTrack.getBoundingClientRect().height)) : 50;
+    const rulerHeight = Math.max(18, Math.round(
+      (this.rulerCanvas.parentElement || {}).clientHeight || RULER_HEIGHT));
+
+    return {
+      headerWidth,
+      contentWidth: Math.max(available, needed),
+      rulerHeight,
+      waveHeight,
+    };
+  }
+
+  /**
+   * Sizes a canvas so one backing pixel maps to one device pixel.
+   * Without this the ruler is both blurry on a Retina display and, worse,
+   * scaled by whatever ratio CSS chose — which is what stretched the timecodes.
+   */
+  sizeCanvas(canvas, cssWidth, cssHeight) {
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const backingW = Math.round(cssWidth * dpr);
+    const backingH = Math.round(cssHeight * dpr);
+
+    if (canvas.width !== backingW || canvas.height !== backingH) {
+      canvas.width = backingW;
+      canvas.height = backingH;
+    }
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${cssHeight}px`;
+
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, width: cssWidth, height: cssHeight };
+  }
+
   resizeAndDraw() {
     this.duration = this.computeDuration(this.player.getDuration());
-    const totalWidth = Math.max(800, this.duration * this.zoomLevel);
-    
-    // Resize Canvas elements
-    this.rulerCanvas.width = totalWidth;
-    this.rulerCanvas.height = 24;
+    const m = this.measure();
+    this.contentWidth = m.contentWidth;
+    this.headerWidth = m.headerWidth;
 
-    this.waveformCanvas.width = totalWidth;
-    this.waveformCanvas.height = 50;
+    this.sizeCanvas(this.rulerCanvas, m.contentWidth, m.rulerHeight);
+    this.sizeCanvas(this.waveformCanvas, m.contentWidth, m.waveHeight);
 
-    this.subtitleContainer.style.width = `${totalWidth}px`;
+    // Clips are positioned in CSS pixels against this element, so it must be
+    // exactly as wide as the canvases for the two to stay in register.
+    this.subtitleContainer.style.width = `${m.contentWidth}px`;
 
     this.drawRuler();
     this.drawWaveform();
@@ -127,8 +203,9 @@ class TimelineController {
   // --- Draw 25 FPS Timeline Ruler ---
   drawRuler() {
     const ctx = this.rulerCtx;
-    const w = this.rulerCanvas.width;
-    const h = this.rulerCanvas.height;
+    // CSS pixels: the context carries a devicePixelRatio transform.
+    const w = this.contentWidth || this.rulerCanvas.clientWidth;
+    const h = parseFloat(this.rulerCanvas.style.height) || RULER_HEIGHT;
 
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = '#1a1a1a';
@@ -181,8 +258,8 @@ class TimelineController {
   // --- Draw Synthetic / Loaded Audio Waveform ---
   drawWaveform() {
     const ctx = this.waveformCtx;
-    const w = this.waveformCanvas.width;
-    const h = this.waveformCanvas.height;
+    const w = this.contentWidth || this.waveformCanvas.clientWidth;
+    const h = parseFloat(this.waveformCanvas.style.height) || 50;
 
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = '#151515';
@@ -261,8 +338,8 @@ class TimelineController {
 
   // --- Update Playhead Position ---
   updatePlayheadPosition(currentTimeSec) {
-    const x = 90 + (currentTimeSec * this.zoomLevel); // 90px track header offset
-    this.playhead.style.left = `${x}px`;
+    const offset = this.headerWidth || TRACK_HEADER_WIDTH;
+    this.playhead.style.left = `${offset + (currentTimeSec * this.zoomLevel)}px`;
   }
 
   scrubPlayheadFromEvent(e) {
