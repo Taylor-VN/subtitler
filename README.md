@@ -186,6 +186,17 @@ tag name, by `<Parameter Name="…">` node, and by attribute, falling back to a
 raw-text scan, and understands Premiere's colour encodings (`#rgb`, `#rrggbb`,
 `#aarrggbb`, `0x…`, `r,g,b`, normalised floats, packed ARGB).
 
+## Interface
+
+The toolbar groups its actions into two menus — **Import** (media, subtitles,
+Premiere presets) and **Export** (ProRes + alpha, SRT, VTT, sequence XML, style
+preset) — with Transcribe, Settings and Help alongside. Every action keeps its
+keyboard shortcut.
+
+One accent colour marks anything actionable. Cyan is reserved for the timeline,
+so cyan always means "time": the playhead, the waveform and every timecode
+readout. Green, amber and red appear only as status, never as button fills.
+
 ## Keyboard shortcuts
 
 | Key | Action |
@@ -217,6 +228,7 @@ js/videoPlayer.js         transport + the canvas renderer (shared by preview and
 js/exporter.js            alpha frame rendering, ffmpeg handoff, PNG-sequence fallback
 js/transcription.js       audio decode/resample/WAV, chunked upload, progress polling
 js/bridge.js              picks the backend transport (native shell or HTTP bridge)
+js/menu.js                header dropdown menus
 js/settings.js            model + runtime manager UI (install/remove, warnings)
 js/captionSegmenter.js    word timings -> broadcast-style captions
 model_registry.py         model + runtime metadata, install-state detection
