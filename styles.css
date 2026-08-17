@@ -1105,10 +1105,15 @@ svg[viewBox]:not(.icon):not(.brand-icon) {
 
 /* --- caption clips --------------------------------------------------- */
 
+/* Stacking order matters: clips are laid out in start-time order, so a later
+   one paints over an earlier one's trim handles. Raising hover/selected/dragged
+   keeps the handles of the clip being worked on reachable even when two
+   captions sit on top of each other. */
 .subtitle-clip {
   position: absolute;
   top: var(--s2);
   bottom: var(--s2);
+  z-index: 1;
   background: rgba(47, 111, 237, 0.2);
   border: 1px solid var(--accent-line);
   border-radius: var(--r-sm);
@@ -1118,11 +1123,24 @@ svg[viewBox]:not(.icon):not(.brand-icon) {
   cursor: grab;
   transition: background-color 0.12s ease;
 }
-.subtitle-clip:hover { background: rgba(47, 111, 237, 0.3); }
+.subtitle-clip:hover { background: rgba(47, 111, 237, 0.3); z-index: 2; }
 .subtitle-clip.selected {
   background: rgba(47, 111, 237, 0.36);
   border-color: var(--accent-hover);
   box-shadow: 0 0 0 1px var(--accent-hover);
+  z-index: 3;
+}
+.subtitle-clip.dragging { z-index: 4; cursor: grabbing; }
+
+/* Imported or hand-typed timecodes can still overlap; mark them, because only
+   one caption can be on screen at a time. */
+.subtitle-clip.overlapping {
+  border-color: var(--warn);
+  background: rgba(224, 160, 50, 0.22);
+}
+.subtitle-clip.overlapping.selected {
+  background: rgba(224, 160, 50, 0.34);
+  box-shadow: 0 0 0 1px var(--warn);
 }
 
 .clip-text {
@@ -1136,16 +1154,33 @@ svg[viewBox]:not(.icon):not(.brand-icon) {
   pointer-events: none;
 }
 
+/* A wider grab target than the visible bar — 5px was a hard thing to hit,
+   especially with a neighbouring clip abutting it. */
 .clip-handle {
-  width: 5px;
+  position: relative;
+  z-index: 2;
+  width: 10px;
   flex-shrink: 0;
   align-self: stretch;
   cursor: ew-resize;
   background: transparent;
 }
-.clip-handle:hover { background: var(--accent-hover); }
-.handle-left { border-radius: var(--r-sm) 0 0 var(--r-sm); }
-.handle-right { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+.clip-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: transparent;
+  transition: background-color 0.12s ease;
+}
+.handle-left::after { left: 0; border-radius: var(--r-sm) 0 0 var(--r-sm); }
+.handle-right::after { right: 0; border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+.clip-handle:hover::after { background: var(--accent-hover); }
+.subtitle-clip.overlapping .clip-handle:hover::after { background: var(--warn); }
+
+/* Text must never intercept a handle drag. */
+.clip-text { position: relative; z-index: 1; }
 
 /* --- playhead -------------------------------------------------------- */
 

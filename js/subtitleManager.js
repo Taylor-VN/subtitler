@@ -124,8 +124,33 @@ class SubtitleManager {
     return true;
   }
 
+  /**
+   * The caption on screen at `timeSec`.
+   *
+   * Where two captions overlap the later-starting one wins. Returning the first
+   * match instead meant an overlapping caption was silently never displayed —
+   * and never exported — which is a confusing way to lose a line.
+   */
   getActiveSubtitleAt(timeSec) {
-    return this.subtitles.find(s => timeSec >= s.start && timeSec <= s.end) || null;
+    let active = null;
+    for (const sub of this.subtitles) {
+      if (timeSec >= sub.start && timeSec <= sub.end) {
+        if (!active || sub.start >= active.start) active = sub;
+      }
+    }
+    return active;
+  }
+
+  /** Pairs of captions whose spans intersect. Empty when the track is clean. */
+  findOverlaps() {
+    const out = [];
+    for (let i = 0; i < this.subtitles.length; i++) {
+      for (let j = i + 1; j < this.subtitles.length; j++) {
+        if (this.subtitles[j].start >= this.subtitles[i].end) break;
+        out.push([this.subtitles[i].id, this.subtitles[j].id]);
+      }
+    }
+    return out;
   }
 
   splitSubtitleAt(id, timeSec) {
