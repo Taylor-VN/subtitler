@@ -158,13 +158,14 @@ class CaptionSegmenter {
     (words || []).forEach(w => {
       const text = String(w.word !== undefined ? w.word : w.text || '').trim();
       if (!text) return;
+      const confidence = typeof w.probability === 'number' ? w.probability : undefined;
       let start = Number(w.start);
       let end = Number(w.end);
       if (!isFinite(start)) start = lastEnd;
       if (!isFinite(end) || end <= start) end = start + 0.08;
       if (start < lastEnd) start = lastEnd;
       if (end <= start) end = start + 0.08;
-      out.push({ text, start, end });
+      out.push({ text, start, end, confidence, corrected: !!w.corrected });
       lastEnd = end;
     });
     return out;
@@ -318,7 +319,9 @@ class CaptionSegmenter {
     return out.map(c => ({
       start: Math.max(0, c.start),
       end: Math.max(c.start + frame, c.end),
-      text: c.text
+      text: c.text,
+      // Retained so callers can report per-word confidence for this caption.
+      words: c.words
     }));
   }
 

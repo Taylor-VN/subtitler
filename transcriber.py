@@ -30,18 +30,25 @@ import threading
 import traceback
 import uuid
 
+import audio_tools
 import bootstrap
 import model_registry as registry
 import engines as engines_mod
+import vocabulary as vocab
 
 TERMINAL_STATES = ('done', 'error', 'cancelled')
+
+# Below this, a word is worth an operator's eye. Whisper-family probabilities
+# cluster high, so the threshold sits well above a coin flip.
+LOW_CONFIDENCE = 0.62
 
 
 class TranscriptionJob:
     def __init__(self, job_id, options):
         self.id = job_id
         self.options = options or {}
-        self.state = 'receiving'      # receiving -> loading -> transcribing -> aligning -> done
+        # receiving -> separating -> loading -> transcribing -> aligning -> done
+        self.state = 'receiving'
         self.progress = 0.0
         self.message = 'Waiting for audio…'
         self.error = None
@@ -51,6 +58,7 @@ class TranscriptionJob:
         self.audio_file = None
         self.bytes_received = 0
         self.thread = None
+        self.notes = []
 
     def snapshot(self):
         return {
@@ -479,16 +487,46 @@ class Transcriber:
                 job.progress = max(0.0, min(0.99, frac))
                 job.message = message
 
-            engine = engines_mod.build_engine(model_desc, opts)
-            job.state = 'loading'
-            engine.load(progress_cb=report)
+            terms = vocab.parse_terms(opts.get('vocabulary'))
+            opts = dict(opts, terms=terms)
 
-            if job.cancelled:
-                raise _Cancelled()
+            # Audio the model will actually see. Kept separate from the audio the
+            # timings are measured against, which stays the original.
+            model_audio = job.audio_path
+            separated = None
 
-            job.state = 'transcribing'
-            job.message = 'Transcribing…'
-            raw = engine.transcribe(job.audio_path, opts, progress_cb=report)
+            if opts.get('suppress_music'):
+                job.state = 'separating'
+                job.message = 'Isolating dialogue from the music bed…'
+                separated = audio_tools.isolate_vocals(job.audio_path, progress_cb=report)
+                if separated:
+                    model_audio = separated
+                    job.notes.append('Dialogue isolated with Demucs.')
+                else:
+                    job.notes.append(
+                        'Music suppression unavailable, so the original mix was used. '
+                        'Install the Demucs runtime in Settings to enable it.')
+
+            # Voice activity is measured on the original audio, since separation
+            # changes levels. Used to discard words that land in silence.
+            regions = None
+            if opts.get('vad', True):
+                regions = audio_tools.speech_regions(job.audio_path)
+
+            try:
+                engine = engines_mod.build_engine(model_desc, opts)
+                job.state = 'loading'
+                engine.load(progress_cb=report)
+
+                if job.cancelled:
+                    raise _Cancelled()
+
+                job.state = 'transcribing'
+                job.message = 'Transcribing…'
+                raw = engine.transcribe(model_audio, opts, progress_cb=report)
+            finally:
+                if separated:
+                    audio_tools.cleanup_dir_of(separated)
 
             if job.cancelled:
                 raise _Cancelled()
@@ -518,10 +556,31 @@ class Transcriber:
                         'Install the aligner from Settings (needs torch + torchaudio), or pick a '
                         'model that provides its own timings, such as Whisper or Parakeet.')
 
+            # Drop words the detector places in silence. These are almost always
+            # hallucinated lines over music or room tone.
+            dropped = 0
+            if regions is not None and words:
+                words, dropped = audio_tools.drop_words_in_silence(words, regions)
+                if dropped:
+                    job.notes.append(f'Removed {dropped} word(s) detected in silence.')
+
+            # Vocabulary pass. Runs for every engine, including the ones that
+            # cannot be prompted at all.
+            corrections = []
+            if terms and words:
+                words, corrections = vocab.apply_terms(words, terms)
+                if corrections:
+                    job.notes.append(f'Applied {len(corrections)} vocabulary correction(s).')
+
+            if words:
+                text = ' '.join(w['word'] for w in words).strip()
+
             segments = raw.get('segments') or []
-            if words and not any(s.get('words') for s in segments):
+            if words and (dropped or corrections or not any(s.get('words') for s in segments)):
                 segments = [{'start': words[0]['start'], 'end': words[-1]['end'],
                              'text': text, 'words': words}]
+
+            confidence = _confidence_summary(words)
 
             job.progress = 1.0
             job.state = 'done'
@@ -534,6 +593,12 @@ class Transcriber:
                 'engine': model_desc['engine'],
                 'model': model_desc.get('label') or model_desc['repo'],
                 'alignment_used': alignment_used,
+                'separated': bool(separated),
+                'vad_dropped': dropped,
+                'speech_seconds': round(audio_tools.speech_seconds(regions), 2) if regions else None,
+                'corrections': corrections,
+                'confidence': confidence,
+                'notes': job.notes,
             }
         except _Cancelled:
             job.state = 'cancelled'
@@ -543,6 +608,33 @@ class Transcriber:
             job.error = f'{e}'
             job.message = str(e)
             job.trace = traceback.format_exc(limit=3)
+
+
+def _confidence_summary(words):
+    """
+    Per-word confidence, where the engine reports it.
+
+    `reported` is False when every word came back at 1.0, which is what an engine
+    without confidence output looks like. Saying so is better than showing a
+    review UI built on a constant.
+    """
+    values = []
+    for w in words or []:
+        try:
+            values.append(float(w.get('probability', 1.0)))
+        except (TypeError, ValueError):
+            values.append(1.0)
+
+    if not values:
+        return {'reported': False, 'min': None, 'mean': None, 'low_count': 0}
+
+    reported = any(v < 0.999 for v in values)
+    return {
+        'reported': reported,
+        'min': round(min(values), 4),
+        'mean': round(sum(values) / len(values), 4),
+        'low_count': sum(1 for v in values if v < LOW_CONFIDENCE) if reported else 0,
+    }
 
 
 class _Cancelled(Exception):

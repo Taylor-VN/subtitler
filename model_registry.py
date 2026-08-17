@@ -279,6 +279,17 @@ RUNTIMES = {
         'notes': ('For NVIDIA GPUs and generic CPU. No Metal backend, so on '
                   'Apple Silicon this stays on the CPU.'),
     },
+    'demucs': {
+        'id': 'demucs',
+        'label': 'Demucs (music suppression)',
+        'packages': ['demucs>=4.0.0', 'torch>=2.2.0', 'torchaudio>=2.2.0'],
+        'module': 'demucs',
+        'platforms': ['any'],
+        'size_mb': 2400,
+        'notes': ('Isolates the dialogue from a music bed before transcribing. The '
+                  'single biggest accuracy gain on advertising and promo material, '
+                  'at the cost of a slow extra pass.'),
+    },
     'aligner-torch': {
         'id': 'aligner-torch',
         'label': 'PyTorch + torchaudio (word-timing aligner)',

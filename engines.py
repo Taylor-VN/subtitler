@@ -21,6 +21,7 @@ import re
 import wave
 
 import model_registry as registry
+import vocabulary as vocab
 
 
 class EngineError(RuntimeError):
@@ -50,11 +51,37 @@ def _read_wav_mono16k(path):
     return samples, rate
 
 
+def supported_kwargs(func, candidates):
+    """
+    Keep only the arguments `func` actually accepts.
+
+    Biasing arguments come and go between releases — faster-whisper's `hotwords`
+    is recent, for instance — and passing an unknown one raises rather than being
+    ignored. Filtering keeps a newer feature usable without pinning a version.
+    """
+    if not candidates:
+        return {}
+    try:
+        import inspect
+        params = inspect.signature(func).parameters
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return dict(candidates)
+        return {k: v for k, v in candidates.items() if k in params}
+    except (TypeError, ValueError):
+        return {}
+
+
 class BaseEngine:
     def __init__(self, model_desc, options=None):
         self.model = model_desc
         self.options = options or {}
         self.handle = None
+
+    def bias_kwargs(self, func):
+        """Native vocabulary biasing for this engine, where it is supported."""
+        terms = self.options.get('terms') or []
+        candidates = vocab.engine_prompt_kwargs(self.model.get('engine'), terms)
+        return supported_kwargs(func, candidates)
 
     @property
     def repo(self):
@@ -96,7 +123,10 @@ class MlxWhisperEngine(BaseEngine):
             language=self._lang(options),
             task=options.get('task') or 'transcribe',
             word_timestamps=True,
-            condition_on_previous_text=False,
+            # Carrying context improves coherence but can send the decoder into
+            # a repetition loop on music and room tone, so it is opt-in.
+            condition_on_previous_text=bool(options.get('carry_context', False)),
+            **self.bias_kwargs(mlx_whisper.transcribe),
         )
 
         segments, words = [], []
@@ -271,6 +301,7 @@ class Qwen3AsrMlxEngine(BaseEngine):
             wav_path,
             path_or_hf_repo=self.repo,
             language=self._lang(options),
+            **self.bias_kwargs(mlx_qwen3_asr.transcribe),
         )
         text = raw.get('text', '') if isinstance(raw, dict) else str(raw)
         language = raw.get('language') if isinstance(raw, dict) else self._lang(options)
@@ -330,6 +361,17 @@ class TransformersEngine(BaseEngine):
             generate_kwargs['language'] = lang
         if options.get('task'):
             generate_kwargs['task'] = options['task']
+
+        terms = options.get('terms') or []
+        if terms:
+            prompt = vocab.build_prompt(terms)
+            tokenizer = getattr(self.handle, 'tokenizer', None)
+            get_prompt_ids = getattr(tokenizer, 'get_prompt_ids', None)
+            if prompt and callable(get_prompt_ids):
+                try:
+                    generate_kwargs['prompt_ids'] = get_prompt_ids(prompt, return_tensors='pt')
+                except Exception:
+                    pass  # checkpoint does not support prompting
 
         wants_words = bool(self.model.get('word_timings'))
         try:
@@ -411,7 +453,8 @@ class FasterWhisperEngine(BaseEngine):
             word_timestamps=True,
             vad_filter=bool(options.get('vad', True)),
             beam_size=int(options.get('beam_size', 5)),
-            condition_on_previous_text=False,
+            condition_on_previous_text=bool(options.get('carry_context', False)),
+            **self.bias_kwargs(self.handle.transcribe),
         )
 
         total = float(getattr(info, 'duration', 0) or 0)

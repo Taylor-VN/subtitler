@@ -14,6 +14,18 @@
 const TARGET_SAMPLE_RATE = 16000;
 const UPLOAD_CHUNK_BYTES = 512 * 1024; // 512 KB per bridge call
 
+// These models are trained on roughly normalised speech, so a quiet VO sitting
+// under a loud music bed measurably underperforms. Level is matched to a target
+// RMS with a peak ceiling rather than simply peak-normalised, because a single
+// loud transient would otherwise leave the dialogue as quiet as it started.
+const TARGET_RMS_DBFS = -20;
+const PEAK_CEILING = 0.97;
+const MAX_GAIN = 12;
+
+// Rumble, traffic and handling noise sit below speech and only cost the model
+// headroom, so they are filtered out before it sees the waveform.
+const HIGHPASS_HZ = 85;
+
 class TranscriptionController {
   constructor() {
     this.cancelled = false;
@@ -51,7 +63,7 @@ class TranscriptionController {
    * Decode whatever the user loaded into 16 kHz mono PCM.
    * @returns {Promise<{wav: Uint8Array, duration: number, sampleRate: number}>}
    */
-  async extractAudio(file, onProgress) {
+  async extractAudio(file, onProgress, opts = {}) {
     if (!file) throw new Error('Load a video or audio file first.');
 
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -76,28 +88,120 @@ class TranscriptionController {
 
     if (decoded.duration <= 0) throw new Error('The audio track is empty.');
 
-    if (onProgress) onProgress(0.35, 'Resampling to 16 kHz mono…');
-    const mono = await this.toMono16k(decoded);
+    if (onProgress) onProgress(0.3, 'Resampling to 16 kHz mono…');
+    const mono = await this.toMono16k(decoded, opts.channel || 'mix');
+
+    let prepared = mono;
+    if (opts.normalise !== false) {
+      if (onProgress) onProgress(0.45, 'Matching level…');
+      prepared = this.normalise(prepared);
+    }
+    // Unconditional, because resampling overshoots: a file that arrives at
+    // -0.1 dBFS comes out of the decode-to-44.1k / render-to-16k pair peaking
+    // around +1.5 dBFS, and encodeWav would hard-clip every one of those
+    // samples. normalise() already respects the ceiling, so this only bites
+    // when the operator has turned level matching off — where clipping would
+    // otherwise be the one thing they did not ask for.
+    prepared = this.limitPeak(prepared);
 
     if (onProgress) onProgress(0.55, 'Encoding WAV…');
-    const wav = this.encodeWav(mono, TARGET_SAMPLE_RATE);
+    const wav = this.encodeWav(prepared, TARGET_SAMPLE_RATE);
 
-    return { wav, duration: decoded.duration, sampleRate: TARGET_SAMPLE_RATE };
+    return {
+      wav,
+      duration: decoded.duration,
+      sampleRate: TARGET_SAMPLE_RATE,
+      channels: decoded.numberOfChannels,
+    };
   }
 
-  /** Downmix to one channel and resample, using an offline graph. */
-  async toMono16k(audioBuffer) {
+  /**
+   * Match the level these models expect.
+   *
+   * Gain is computed from RMS, then reduced if it would push the peak into
+   * clipping — clipped dialogue transcribes worse than quiet dialogue.
+   */
+  normalise(samples) {
+    let sumSquares = 0;
+    let peak = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const v = samples[i];
+      sumSquares += v * v;
+      const a = Math.abs(v);
+      if (a > peak) peak = a;
+    }
+    if (!samples.length || peak === 0) return samples;
+
+    const rms = Math.sqrt(sumSquares / samples.length);
+    if (rms < 1e-7) return samples;
+
+    const targetRms = Math.pow(10, TARGET_RMS_DBFS / 20);
+    let gain = Math.min(targetRms / rms, MAX_GAIN);
+    gain = Math.min(gain, PEAK_CEILING / peak);
+    if (gain <= 1.001 && gain >= 0.999) return samples;
+
+    const out = new Float32Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const v = samples[i] * gain;
+      out[i] = v > 1 ? 1 : (v < -1 ? -1 : v);
+    }
+    return out;
+  }
+
+  /**
+   * Scale down so nothing exceeds the peak ceiling. A no-op for material that
+   * already has headroom, so it never alters a level the operator chose.
+   */
+  limitPeak(samples) {
+    let peak = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const a = Math.abs(samples[i]);
+      if (a > peak) peak = a;
+    }
+    if (peak <= PEAK_CEILING || peak === 0) return samples;
+
+    const gain = PEAK_CEILING / peak;
+    const out = new Float32Array(samples.length);
+    for (let i = 0; i < samples.length; i++) out[i] = samples[i] * gain;
+    return out;
+  }
+
+  /**
+   * Downmix (or pick a channel), high-pass and resample, using an offline graph.
+   *
+   * @param channel 'mix' | 'left' | 'right' | 'centre' | number
+   *
+   * Picking a single channel matters for post deliverables: dialogue is often
+   * centre-panned or on its own channel, and downmixing it together with a
+   * stereo music bed throws away the very separation that makes it legible.
+   */
+  async toMono16k(audioBuffer, channel = 'mix') {
     const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
     const frames = Math.max(1, Math.ceil(audioBuffer.duration * TARGET_SAMPLE_RATE));
+    // Always hand the graph a mono buffer. Letting a multi-channel source be
+    // downmixed implicitly is not safe: the Web Audio speaker downmix *sums*
+    // its inputs, so dual-mono dialogue at -3 dBFS — or any hot 5.1 mix — comes
+    // out hard-clipped, and clipped dialogue transcribes badly. It also
+    // disagreed with manualResample, which averages, so the same file gave two
+    // different levels depending on which path ran.
+    const source = this.downmixToMono(this.selectChannel(audioBuffer, channel));
 
     if (OfflineCtx) {
       try {
         const offline = new OfflineCtx(1, frames, TARGET_SAMPLE_RATE);
         const src = offline.createBufferSource();
-        src.buffer = audioBuffer;
-        // Connecting a multi-channel source to a 1-channel destination performs
-        // the standard downmix, so no manual averaging is needed.
-        src.connect(offline.destination);
+        src.buffer = source;
+
+        const highpass = offline.createBiquadFilter();
+        highpass.type = 'highpass';
+        highpass.frequency.value = HIGHPASS_HZ;
+        // Butterworth. The default Q of 1 is resonant, which puts a small gain
+        // bump immediately above the corner — the rumble region this filter
+        // exists to suppress — and worsens the start-up overshoot.
+        highpass.Q.value = Math.SQRT1_2;
+
+        src.connect(highpass);
+        highpass.connect(offline.destination);
         src.start(0);
         const rendered = await offline.startRendering();
         return rendered.getChannelData(0);
@@ -105,7 +209,71 @@ class TranscriptionController {
         // Some engines refuse unusual sample rates; fall through to manual.
       }
     }
-    return this.manualResample(audioBuffer, frames);
+    return this.manualResample(source, frames);
+  }
+
+  /**
+   * Returns a buffer containing just the requested channel, or the original
+   * buffer for 'mix'. 'centre' is channel 2 in the WAVE/5.1 ordering
+   * (L, R, C, LFE, Ls, Rs), which is where dialogue usually lives.
+   */
+  selectChannel(audioBuffer, channel) {
+    const count = audioBuffer.numberOfChannels;
+    if (channel === 'mix' || count <= 1) return audioBuffer;
+
+    const index = channel === 'left' ? 0
+      : channel === 'right' ? 1
+      : channel === 'centre' ? 2
+      : Number(channel);
+
+    if (!Number.isInteger(index) || index < 0 || index >= count) {
+      return audioBuffer; // asked for a channel this file does not have
+    }
+
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const single = new AudioCtx().createBuffer(1, audioBuffer.length, audioBuffer.sampleRate);
+    single.copyToChannel(audioBuffer.getChannelData(index), 0);
+    return single;
+  }
+
+  /**
+   * Fold a multi-channel buffer down to one channel without ever exceeding the
+   * input's peak.
+   *
+   * Weights follow ITU-R BS.775 for a 5.1 layout (L, R, C, LFE, Ls, Rs): the
+   * centre channel carries the dialogue so it keeps full weight, the surrounds
+   * are attenuated, and the LFE is dropped entirely — it holds no speech and
+   * only adds rumble the high-pass would have to remove anyway. Anything that
+   * is not a recognised layout is averaged. Dividing through by the total
+   * weight is what guarantees no clipping.
+   */
+  downmixToMono(audioBuffer) {
+    const count = audioBuffer.numberOfChannels;
+    if (count <= 1) return audioBuffer;
+
+    // Index-aligned with the WAVE channel order.
+    const weights = count >= 6
+      ? [0.707, 0.707, 1.0, 0.0, 0.5, 0.5]
+      : new Array(count).fill(1);
+    while (weights.length < count) weights.push(0.5);
+
+    const total = weights.slice(0, count).reduce((a, w) => a + w, 0) || 1;
+    const data = [];
+    for (let c = 0; c < count; c++) data.push(audioBuffer.getChannelData(c));
+
+    const out = new Float32Array(audioBuffer.length);
+    for (let i = 0; i < out.length; i++) {
+      let sum = 0;
+      for (let c = 0; c < count; c++) {
+        if (weights[c]) sum += data[c][i] * weights[c];
+      }
+      out[i] = sum / total;
+    }
+
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const mono = new AudioCtx().createBuffer(1, audioBuffer.length, audioBuffer.sampleRate);
+    mono.copyToChannel(out, 0);
+    return mono;
   }
 
   /** Linear-interpolation fallback when OfflineAudioContext is unavailable. */
@@ -184,8 +352,10 @@ class TranscriptionController {
       );
     }
 
-    const file = opts.file || this.currentFile;
-    const audio = await this.extractAudio(file, report);
+    // A separate dialogue stem, when the operator has one, is free accuracy:
+    // no processing and no model change, just cleaner input.
+    const file = opts.audioFile || opts.file || this.currentFile;
+    const audio = await this.extractAudio(file, report, opts);
     if (this.cancelled) throw new Error('Cancelled.');
 
     report(0.6, 'Starting transcription job…');
@@ -199,6 +369,9 @@ class TranscriptionController {
       beam_size: opts.beamSize || 5,
       engine: opts.engine || 'auto',
       align: opts.align === undefined ? 'auto' : opts.align,
+      vocabulary: opts.vocabulary || '',
+      suppress_music: !!opts.suppressMusic,
+      carry_context: !!opts.carryContext,
     });
     if (!begun || !begun.ok) throw new Error((begun && begun.error) || 'Could not start transcription.');
     this.jobId = begun.job_id;
