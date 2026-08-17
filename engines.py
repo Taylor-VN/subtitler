@@ -27,6 +27,16 @@ class EngineError(RuntimeError):
     pass
 
 
+class _Unit:
+    """Minimal token-like holder so chunk lists can reuse words_from_tokens()."""
+    __slots__ = ('text', 'start', 'end')
+
+    def __init__(self, text, start, end):
+        self.text = text or ''
+        self.start = start
+        self.end = end
+
+
 def _read_wav_mono16k(path):
     """The front-end always sends 16 kHz mono PCM, so this stays simple."""
     with wave.open(path, 'rb') as w:
@@ -112,6 +122,84 @@ class MlxWhisperEngine(BaseEngine):
                 'language': raw.get('language'), 'text': raw.get('text', '')}
 
 
+def _token_text(tok):
+    """Token text with the SentencePiece word-start marker turned into a space."""
+    text = getattr(tok, 'text', None)
+    if text is None:
+        text = getattr(tok, 'token', '') or ''
+    return str(text).replace('▁', ' ')
+
+
+def words_from_tokens(tokens, sentence_text=''):
+    """
+    Group sub-word tokens into whole words, keeping their timings.
+
+    Token-level models emit SentencePiece pieces, not words: "Darren" arrives as
+    ["▁D", "ar", "ren"] and punctuation as its own piece. Treating each piece as
+    a word produces "D ar ren thought run ning" once the segmenter joins them
+    with spaces, so the pieces have to be reassembled here.
+
+    A new word starts at a piece that begins with whitespace (the marker), and
+    the word inherits the first piece's start and the last piece's end. If the
+    pieces carry no boundary markers at all, falls back to the model's own
+    sentence text with timings distributed across it, so the words are always
+    right even when the timings are approximate.
+    """
+    spans = []
+    cursor = 0
+    for tok in tokens:
+        text = _token_text(tok)
+        try:
+            start = float(getattr(tok, 'start', 0.0) or 0.0)
+            end = float(getattr(tok, 'end', start) or start)
+        except (TypeError, ValueError):
+            start = end = 0.0
+        spans.append({'text': text, 'from': cursor, 'to': cursor + len(text),
+                      'start': start, 'end': end})
+        cursor += len(text)
+
+    if not spans:
+        return []
+
+    joined = ''.join(s['text'] for s in spans)
+    words = []
+    for match in re.finditer(r'\S+', joined):
+        lo, hi = match.start(), match.end()
+        covering = [s for s in spans if s['to'] > lo and s['from'] < hi]
+        if not covering:
+            continue
+        words.append({
+            'word': match.group(0),
+            'start': covering[0]['start'],
+            'end': max(c['end'] for c in covering),
+            'probability': 1.0,
+        })
+
+    # No boundary markers: everything concatenated into a single run. Use the
+    # model's sentence text for the wording and spread the timings over it.
+    expected = len(re.findall(r'\S+', sentence_text or ''))
+    if expected > 1 and len(words) <= 1:
+        return _distribute_words(sentence_text, spans[0]['start'],
+                                 max(s['end'] for s in spans))
+
+    return words
+
+
+def _distribute_words(text, start, end):
+    """Even fallback timing when per-word boundaries cannot be recovered."""
+    parts = re.findall(r'\S+', text or '')
+    if not parts:
+        return []
+    span = max(0.01, end - start)
+    per = span / len(parts)
+    return [{
+        'word': part,
+        'start': start + i * per,
+        'end': start + (i + 1) * per,
+        'probability': 1.0,
+    } for i, part in enumerate(parts)]
+
+
 class ParakeetMlxEngine(BaseEngine):
     """NVIDIA Parakeet on the Apple GPU through MLX. English, fast, accurate."""
 
@@ -130,27 +218,36 @@ class ParakeetMlxEngine(BaseEngine):
         raw = self.handle.transcribe(wav_path)
 
         words, segments = [], []
-        for seg in (getattr(raw, 'sentences', None) or []):
-            seg_words = []
-            for tok in (getattr(seg, 'tokens', None) or []):
-                item = {
-                    'word': getattr(tok, 'text', ''),
-                    'start': float(getattr(tok, 'start', 0.0)),
-                    'end': float(getattr(tok, 'end', 0.0)),
-                    'probability': 1.0,
-                }
-                seg_words.append(item)
-                words.append(item)
+        sentences = getattr(raw, 'sentences', None) or []
+
+        for seg in sentences:
+            seg_text = (getattr(seg, 'text', '') or '').strip()
+            # Reassemble sub-word pieces into words before anything downstream
+            # sees them; the caption segmenter joins words with spaces.
+            seg_words = words_from_tokens(getattr(seg, 'tokens', None) or [], seg_text)
+            words.extend(seg_words)
             segments.append({
-                'start': float(getattr(seg, 'start', 0.0)),
-                'end': float(getattr(seg, 'end', 0.0)),
-                'text': (getattr(seg, 'text', '') or '').strip(),
+                'start': float(getattr(seg, 'start', 0.0) or 0.0),
+                'end': float(getattr(seg, 'end', 0.0) or 0.0),
+                'text': seg_text or ' '.join(w['word'] for w in seg_words),
                 'words': seg_words,
             })
 
-        text = getattr(raw, 'text', '') or ' '.join(s['text'] for s in segments)
-        if not segments and text:
-            segments = [{'start': 0.0, 'end': 0.0, 'text': text.strip(), 'words': []}]
+        # Some builds report only a flat token list rather than sentences.
+        if not sentences:
+            flat = getattr(raw, 'tokens', None) or []
+            raw_text = (getattr(raw, 'text', '') or '').strip()
+            words = words_from_tokens(flat, raw_text)
+            if words or raw_text:
+                segments = [{
+                    'start': words[0]['start'] if words else 0.0,
+                    'end': words[-1]['end'] if words else 0.0,
+                    'text': raw_text or ' '.join(w['word'] for w in words),
+                    'words': words,
+                }]
+
+        text = (getattr(raw, 'text', '') or '').strip() \
+            or ' '.join(s['text'] for s in segments).strip()
 
         return {'segments': segments, 'words': words, 'language': 'en', 'text': text}
 
@@ -244,17 +341,26 @@ class TransformersEngine(BaseEngine):
             raw = self.handle(wav_path)
 
         text = (raw.get('text') if isinstance(raw, dict) else str(raw)) or ''
-        words = []
+
+        units = []
         for chunk in ((raw.get('chunks') if isinstance(raw, dict) else None) or []):
             ts = chunk.get('timestamp') or (None, None)
             if ts[0] is None:
                 continue
-            words.append({
-                'word': chunk.get('text', ''),
-                'start': float(ts[0]),
-                'end': float(ts[1] if ts[1] is not None else ts[0] + 0.2),
-                'probability': 1.0,
-            })
+            units.append(_Unit(chunk.get('text', ''),
+                               float(ts[0]),
+                               float(ts[1] if ts[1] is not None else ts[0] + 0.2)))
+
+        # Whisper-family checkpoints return one chunk per word; CTC and some
+        # LLM-backbone ones return sub-word pieces. Many more chunks than words
+        # in the transcript means pieces, which have to be reassembled or the
+        # captions come out as "D ar ren thought run ning".
+        expected = len(re.findall(r'\S+', text))
+        if expected and len(units) > expected * 1.5:
+            words = words_from_tokens(units, text)
+        else:
+            words = [{'word': u.text.strip(), 'start': u.start, 'end': u.end,
+                      'probability': 1.0} for u in units if u.text.strip()]
 
         segments = [{
             'start': words[0]['start'] if words else 0.0,
