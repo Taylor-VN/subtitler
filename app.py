@@ -1,6 +1,17 @@
+"""
+Taylor's Transcriber — desktop shell.
+
+Serves the interface from a local HTTP server and opens it in a native window.
+If no native GUI backend can be loaded, falls back to the default browser and
+exposes the same backend API over an authenticated localhost bridge, so exporting
+and transcription keep working.
+"""
+
 import os
 import sys
 import base64
+import json
+import secrets
 import shutil
 import socket
 import subprocess
@@ -9,6 +20,7 @@ import threading
 import http.server
 import socketserver
 import uuid
+import webbrowser
 
 from transcriber import Transcriber
 
@@ -49,6 +61,33 @@ def find_ffmpeg():
     return None
 
 
+# Shared secret for the HTTP bridge used by the browser fallback. Regenerated
+# every launch; without it the API endpoints refuse to answer, so another local
+# process or a web page cannot drive the backend.
+API_TOKEN = secrets.token_urlsafe(24)
+
+# Set when running without a native window, so the API bridge is only reachable
+# in the mode that actually needs it.
+BRIDGE_ENABLED = False
+BRIDGE_API = None
+
+# Methods the browser fallback may call. save_text_file is deliberately excluded:
+# in a browser the page downloads text exports itself, which is the better
+# behaviour than writing them server-side to a guessed directory.
+BRIDGE_METHODS = {
+    'get_capabilities',
+    'transcribe_probe', 'transcribe_begin', 'transcribe_push_audio',
+    'transcribe_finish_audio', 'transcribe_status', 'transcribe_cancel',
+    'transcribe_cleanup',
+    'models_list', 'model_install', 'model_install_status',
+    'model_install_cancel', 'model_remove',
+    'runtimes_list', 'runtime_install', 'runtime_install_status',
+    'begin_export', 'write_frame', 'repeat_frame', 'encode_prores', 'cleanup_export',
+}
+
+MAX_BRIDGE_BODY = 64 * 1024 * 1024  # frames and audio chunks are the large ones
+
+
 class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=DIRECTORY, **kwargs)
@@ -56,11 +95,76 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    # --- security -------------------------------------------------------
+    def _host_is_local(self):
+        """Guards against DNS rebinding: only answer to a loopback Host."""
+        host = (self.headers.get('Host') or '').split(':')[0].strip('[]')
+        return host in ('127.0.0.1', 'localhost', '::1', '')
+
+    def _authorised(self):
+        return self.headers.get('X-Api-Token') == API_TOKEN
+
+    def _send_json(self, payload, status=200):
+        body = json.dumps(payload).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(body)
+
+    # --- API bridge -----------------------------------------------------
+    def do_POST(self):
+        if not self.path.startswith('/__api/'):
+            self.send_error(404)
+            return
+        if not BRIDGE_ENABLED or BRIDGE_API is None:
+            self._send_json({'ok': False, 'error': 'The API bridge is not enabled.'}, 403)
+            return
+        if not self._host_is_local() or not self._authorised():
+            self._send_json({'ok': False, 'error': 'Not authorised.'}, 403)
+            return
+
+        method = self.path[len('/__api/'):]
+        if method not in BRIDGE_METHODS:
+            self._send_json({'ok': False, 'error': f'Unknown method "{method}".'}, 404)
+            return
+
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+            if length > MAX_BRIDGE_BODY:
+                self._send_json({'ok': False, 'error': 'Request too large.'}, 413)
+                return
+            raw = self.rfile.read(length) if length else b'{}'
+            args = json.loads(raw or b'{}').get('args', [])
+            if not isinstance(args, list):
+                args = [args]
+            result = getattr(BRIDGE_API, method)(*args)
+            self._send_json({'ok': True, 'result': result})
+        except Exception as e:
+            self._send_json({'ok': False, 'error': str(e)}, 500)
+
+    def do_GET(self):
+        # The page needs to know whether a bridge exists and what token to use.
+        if self.path.split('?')[0] == '/__api/config':
+            if not self._host_is_local():
+                self._send_json({'ok': False}, 403)
+                return
+            self._send_json({'ok': True, 'bridge': BRIDGE_ENABLED,
+                             'token': API_TOKEN if BRIDGE_ENABLED else None})
+            return
+        super().do_GET()
+
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    """Threaded so a long transcription call cannot block the page from loading."""
+    daemon_threads = True
+    allow_reuse_address = True
+
 
 def run_server(port):
-    socketserver.TCPServer.allow_reuse_address = True
     try:
-        with socketserver.TCPServer(("127.0.0.1", port), CustomHTTPRequestHandler) as httpd:
+        with ThreadingHTTPServer(("127.0.0.1", port), CustomHTTPRequestHandler) as httpd:
             httpd.serve_forever()
     except Exception as e:
         print(f"Server notice: {e}")
@@ -268,9 +372,77 @@ class ExportApi:
         return result if isinstance(result, str) else result[0]
 
 
+def launch_native(port, api):
+    """Open the pywebview window. Returns False if no GUI backend will load."""
+    ok, message = bootstrap.diagnose_gui_backend()
+    if not ok:
+        print('\nCould not open a native window:')
+        for line in message.splitlines():
+            print(f'  {line}')
+        return False
+
+    webview.create_window(
+        title="Taylor's Transcriber — Premiere Captions Editor",
+        url=f'http://127.0.0.1:{port}',
+        js_api=api,
+        width=1400,
+        height=900,
+        resizable=True,
+        min_size=(1024, 700),
+        background_color='#121212'
+    )
+    try:
+        webview.start()
+        return True
+    except Exception as e:
+        print(f'\nThe native window failed to start: {e}')
+        return False
+
+
+def launch_browser(port, api):
+    """
+    Fallback when no native GUI backend is available.
+
+    The whole interface is already served over the local HTTP server, so the app
+    works in a browser. The only piece pywebview normally provides is the
+    js_api bridge, which is exposed over authenticated localhost HTTP instead —
+    so exporting and transcription keep working rather than being disabled.
+    """
+    global BRIDGE_ENABLED, BRIDGE_API
+    BRIDGE_API = api
+    BRIDGE_ENABLED = True
+
+    url = f'http://127.0.0.1:{port}/index.html'
+    print('\nFalling back to your browser.')
+    print(f'  {url}')
+    print('  Backend features (ProRes export, transcription) work in this mode too.')
+    print('  Text exports download through the browser instead of a save dialog.')
+    print('\nPress Ctrl+C to quit.\n')
+
+    try:
+        webbrowser.open(url)
+    except Exception:
+        print('Could not open the browser automatically — open the URL above yourself.')
+
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        print('\nShutting down.')
+
+
 if __name__ == '__main__':
-    # Create/enter the project's own virtual environment before anything else.
-    # This re-executes the process with the venv interpreter on first run.
+    if any(a in ('-h', '--help') for a in sys.argv[1:]):
+        print(__doc__ or '')
+        print('Usage: python3 app.py [--browser]\n')
+        print('  --browser   Skip the native window and use your default browser.')
+        print('              Backend features still work over an authenticated')
+        print('              localhost bridge.\n')
+        print('Environment:')
+        print('  TRANSCRIBER_VENV   Override where the app keeps its virtual environment.')
+        sys.exit(0)
+
+    # Create/enter the app's own virtual environment before anything else. This
+    # re-executes the process with the venv interpreter on first run.
     import bootstrap
     bootstrap.ensure_environment()
 
@@ -281,20 +453,17 @@ if __name__ == '__main__':
         except ImportError:
             pass
 
-    if webview is None:
-        sys.exit(
-            "pywebview is not installed.\n"
-            "Launch the app with ./run_subtitler.sh instead — it sets up its own\n"
-            "environment automatically.\n"
-        )
+    force_browser = any(a in ('--browser', '--no-native') for a in sys.argv[1:])
 
     port = find_available_port(8000)
 
-    # Start background local server for static files
+    # Start background local server for static files (and, in browser mode, the
+    # API bridge).
     server_thread = threading.Thread(target=run_server, args=(port,), daemon=True)
     server_thread.start()
 
-    print(f"Launching Standalone Desktop Window for Taylor's Transcriber on port {port}...")
+    print(f"Taylor's Transcriber starting on port {port}...")
+    print(f"Environment: {bootstrap.VENV_DIR}")
     if find_ffmpeg():
         print(f"ffmpeg found at {find_ffmpeg()} — ProRes 4444 alpha export enabled.")
     else:
@@ -309,20 +478,13 @@ if __name__ == '__main__':
         if _probe.get('apple_silicon') and 'faster-whisper' in _probe['engines'] \
                 and not any(e.startswith('mlx') or 'parakeet' in e for e in _probe['engines']):
             print("Note: faster-whisper runs CPU-only on Apple Silicon. "
-                  "Install mlx-whisper or parakeet-mlx to use the GPU.")
+                  "Install mlx-whisper or parakeet-mlx in Settings to use the GPU.")
     else:
         print("AI transcription: no runtime installed yet. "
               "Open Settings in the app to install one.")
 
-    # Launch Native PyWebView Standalone Desktop Window
-    webview.create_window(
-        title="Taylor's Transcriber — Premiere Captions Editor",
-        url=f'http://127.0.0.1:{port}',
-        js_api=api,
-        width=1400,
-        height=900,
-        resizable=True,
-        min_size=(1024, 700),
-        background_color='#121212'
-    )
-    webview.start()
+    if force_browser:
+        print('Browser mode requested (--browser).')
+        launch_browser(port, api)
+    elif webview is None or not launch_native(port, api):
+        launch_browser(port, api)

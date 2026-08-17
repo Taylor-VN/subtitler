@@ -3,7 +3,14 @@
  * Premiere Pro Style Subtitling Tool Entry Point
  */
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  // The backend transport settles asynchronously: under the desktop shell it is
+  // already injected, but in browser-fallback mode it is discovered over HTTP.
+  // Wait for it so the first capability probe sees the real answer.
+  if (window.bridgeReady) {
+    try { await window.bridgeReady; } catch (e) { /* static mode */ }
+  }
+
   const FPS = 25;
 
   // Initialize Core Modules (25 FPS Default)

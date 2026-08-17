@@ -2,7 +2,8 @@
 REM Launcher for Taylor's Transcriber on Windows.
 REM
 REM Nothing needs installing first. The first run creates a private virtual
-REM environment in .venv inside this folder; later runs launch straight away.
+REM environment under %LOCALAPPDATA%; later runs launch straight away.
+REM Pass --browser to skip the native window and use your default browser.
 setlocal
 cd /d "%~dp0"
 
