@@ -1,2 +1,7 @@
+# The app's own virtual environment, created on first launch by bootstrap.py
+.venv/
+
 __pycache__/
 *.pyc
+
+.DS_Store

@@ -507,6 +507,19 @@
 
         <div class="settings-section">
           <div class="settings-section-head">
+            <label class="group-label">Speech Runtimes</label>
+            <button id="btnInstallRecommended" class="btn-model primary">Install recommended setup</button>
+          </div>
+          <p class="modal-hint tight">
+            These are the engines that actually run the models. They install into
+            this app's own environment inside its folder — nothing touches your
+            system Python, and no terminal is needed.
+          </p>
+          <div id="runtimeList" class="model-list">Checking runtimes…</div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-head">
             <label class="group-label">Word Timing Aligner</label>
           </div>
           <p class="modal-hint tight">

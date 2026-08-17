@@ -128,6 +128,16 @@ class ExportApi:
     def model_remove(self, model_id):
         return self.transcriber.remove_model(model_id)
 
+    # --- optional runtime management --------------------------------------
+    def runtimes_list(self):
+        return self.transcriber.list_runtimes()
+
+    def runtime_install(self, runtime_id):
+        return self.transcriber.install_runtime(runtime_id)
+
+    def runtime_install_status(self, job_id):
+        return self.transcriber.runtime_install_status(job_id)
+
     # --- export lifecycle -------------------------------------------------
     def begin_export(self, meta):
         try:
@@ -259,10 +269,23 @@ class ExportApi:
 
 
 if __name__ == '__main__':
+    # Create/enter the project's own virtual environment before anything else.
+    # This re-executes the process with the venv interpreter on first run.
+    import bootstrap
+    bootstrap.ensure_environment()
+
+    import importlib
+    if webview is None:
+        try:
+            webview = importlib.import_module('webview')
+        except ImportError:
+            pass
+
     if webview is None:
         sys.exit(
             "pywebview is not installed.\n"
-            "Install it with:  pip install pywebview\n"
+            "Launch the app with ./run_subtitler.sh instead — it sets up its own\n"
+            "environment automatically.\n"
         )
 
     port = find_available_port(8000)
@@ -288,7 +311,8 @@ if __name__ == '__main__':
             print("Note: faster-whisper runs CPU-only on Apple Silicon. "
                   "Install mlx-whisper or parakeet-mlx to use the GPU.")
     else:
-        print("AI transcription unavailable — run 'pip install -r requirements.txt' to enable it.")
+        print("AI transcription: no runtime installed yet. "
+              "Open Settings in the app to install one.")
 
     # Launch Native PyWebView Standalone Desktop Window
     webview.create_window(
