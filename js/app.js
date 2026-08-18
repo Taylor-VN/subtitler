@@ -153,8 +153,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const restored = restoreAutosave();
     if (!restored) {
       const film = project.getActive();
-      film.subtitles = STARTER_CAPTIONS.map((sub, i) => ({ id: `sub_demo_${i}`, ...sub }));
-      film.preset = { ...playerController.activePreset };
+      project.setCaptionsAllRatios(film.id, STARTER_CAPTIONS);
     }
 
     applyActiveFilm();
@@ -205,19 +204,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       reader.onload = (evt) => {
         const content = evt.target.result;
         try {
+          let list;
           if (file.name.toLowerCase().endsWith('.json')) {
             const parsed = JSON.parse(content);
-            const list = Array.isArray(parsed) ? parsed : parsed.subtitles;
+            list = Array.isArray(parsed) ? parsed : parsed.subtitles;
             if (!Array.isArray(list)) throw new Error('JSON must be an array of subtitles.');
-            subManager.setSubtitles(list);
           } else {
-            subManager.parseSRT(content); // handles both SRT and VTT
+            list = subManager.parseSubtitleText(content); // handles both SRT and VTT
           }
-          const count = subManager.getSubtitles().length;
+          // An imported file is the words for this edit, not for one shape of
+          // it, so it lands in every ratio.
+          const count = setCaptionsEverywhere(list);
           if (count === 0) {
             toast(`No captions could be read from "${file.name}".`, 'warn');
           } else {
-            toast(`Imported ${count} caption${count === 1 ? '' : 's'} from "${file.name}".`, 'success');
+            toast(`Imported ${count} caption${count === 1 ? '' : 's'} from "${file.name}" `
+              + 'into all four aspect ratios.', 'success', 6000);
           }
         } catch (err) {
           toast(`Could not read "${file.name}": ${err.message}`, 'error', 6000);
@@ -354,9 +356,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else if (/\.(srt|vtt)$/.test(lower)) {
         const reader = new FileReader();
         reader.onload = (evt) => {
-          subManager.parseSRT(evt.target.result);
-          timelineController.resizeAndDraw();
-          toast(`Imported ${subManager.getSubtitles().length} captions from "${file.name}".`, 'success');
+          const count = setCaptionsEverywhere(subManager.parseSubtitleText(evt.target.result));
+          toast(count
+            ? `Imported ${count} captions from "${file.name}" into all four aspect ratios.`
+            : `No captions could be read from "${file.name}".`, count ? 'success' : 'warn', 6000);
         };
         reader.readAsText(file);
       } else if (/\.(prfpset|prtextstyle|xml)$/.test(lower)) {
@@ -389,11 +392,12 @@ document.addEventListener('DOMContentLoaded', async () => {
    * writing "subtitles.srt" into the same delivery folder is a real way to lose
    * a deliverable, and the operator has already named both things.
    */
-  function exportName(suffix) {
+  function exportName(suffix, ratioId) {
     const film = project.getActive();
     const job = ProjectManager.slug(project.name, 'project');
     const edit = ProjectManager.slug(film ? film.name : 'film', 'film');
-    return `${job}_${edit}${suffix}`;
+    const ratio = ratioId || (film ? film.activeRatio : '');
+    return `${job}_${edit}${ratio ? '_' + ratio : ''}${suffix}`;
   }
 
   function readPresetFile(file) {
@@ -425,36 +429,114 @@ document.addEventListener('DOMContentLoaded', async () => {
     pauseIcon.classList.toggle('hidden', !playerController.isPlaying);
   }
 
+  // --- Safe-area guides ---
+  /**
+   * Visibility and guide set are separate questions. `G` toggles whether the
+   * guides are drawn at all; the dropdown beside it chooses which set, and that
+   * choice belongs to the ratio — EBU on the 16:9 deliverable, TikTok on the
+   * vertical one — so it is stored per ratio and comes back with it.
+   */
   function toggleSafeGuides() {
     const guides = document.getElementById('safeGuides');
     const btn = document.getElementById('btnSafeGuides');
     const nowVisible = guides.classList.toggle('hidden') === false;
     btn.classList.toggle('active', nowVisible);
+    if (nowVisible) renderGuides();
     return nowVisible;
   }
 
-  // --- Aspect Ratio Switching ---
+  function currentGuideSetId() {
+    const select = document.getElementById('safeGuideSelect');
+    return (select && select.value) || 'generic';
+  }
+
+  function populateGuideSelect(ratioId, wantedId) {
+    const select = document.getElementById('safeGuideSelect');
+    if (!select) return;
+
+    const sets = safeAreaSetsFor(ratioId);
+    select.innerHTML = '';
+    sets.forEach(set => {
+      const opt = document.createElement('option');
+      opt.value = set.id;
+      // The asterisk marks a set measured off a live interface rather than
+      // published by the platform. The title carries the full provenance.
+      opt.textContent = set.label + (set.source === 'practical' ? ' *' : '');
+      opt.title = set.note;
+      select.appendChild(opt);
+    });
+
+    // A set offered for 9:16 is not offered for 16:9, so a remembered choice
+    // can be unavailable after a ratio switch. Fall back rather than blank.
+    select.value = sets.some(set => set.id === wantedId) ? wantedId : 'generic';
+    select.title = getSafeAreaSet(select.value).note;
+  }
+
+  function renderGuides() {
+    const container = document.getElementById('safeGuides');
+    if (!container || container.classList.contains('hidden')) return;
+    renderSafeAreas(container, currentGuideSetId(), playerController.project.id);
+  }
+
+  // --- Aspect ratio switching ---
+  /**
+   * The ratio buttons no longer change a property of the film — they choose
+   * which of the film's caption sets is being edited and previewed. A film is
+   * an edit; it is delivered in every shape.
+   */
   function bindAspectRatioControls() {
     const buttons = document.querySelectorAll('.aspect-btn');
 
     buttons.forEach(btn => {
-      btn.addEventListener('click', () => setAspect(btn.dataset.aspect));
+      btn.addEventListener('click', () => switchRatio(btn.dataset.aspect));
     });
 
-    playerController.onProjectChange((project) => {
-      document.getElementById('projectResLabel').textContent = `${project.width}×${project.height}`;
-      const info = document.getElementById('exportResInfo');
-      if (info) info.textContent = `${project.width} × ${project.height} (${project.label})`;
-      buttons.forEach(b => b.classList.toggle('active', b.dataset.aspect === project.id));
+    document.getElementById('safeGuideSelect').addEventListener('change', () => {
+      const ratio = project.getActiveRatio();
+      if (ratio) ratio.guides = currentGuideSetId();
+      document.getElementById('safeGuideSelect').title = getSafeAreaSet(currentGuideSetId()).note;
+      // Choosing a set is a request to look at it.
+      const container = document.getElementById('safeGuides');
+      if (container.classList.contains('hidden')) toggleSafeGuides();
+      else renderGuides();
+      project.markDirty();
+      scheduleAutosave();
+    });
+
+    playerController.onProjectChange((proj) => {
+      document.getElementById('projectResLabel').textContent = `${proj.width}×${proj.height}`;
+      buttons.forEach(b => b.classList.toggle('active', b.dataset.aspect === proj.id));
+      renderGuides();
     });
 
     // Publish the initial state through the same path
-    setAspect('16x9');
+    playerController.setAspectRatio('16x9');
   }
 
-  function setAspect(aspectId) {
-    const project = playerController.setAspectRatio(aspectId);
-    return project;
+  /** Caption counts on the ratio buttons, plus the badge over the caption list. */
+  function renderRatioUI() {
+    const film = project.getActive();
+    if (!film) return;
+    const label = (id) => id.replace('x', ':');
+
+    document.querySelectorAll('.aspect-btn').forEach(btn => {
+      const rid = btn.dataset.aspect;
+      const isActive = rid === film.activeRatio;
+      const count = isActive
+        ? subManager.getSubtitles().length
+        : project.captionCount(film.id, rid);
+      const counter = btn.querySelector('.aspect-count');
+      if (counter) counter.textContent = count ? String(count) : '';
+      btn.title = `${label(rid)} — ${count} caption${count === 1 ? '' : 's'}`
+        + (count ? '' : ' (empty — nothing to export in this ratio yet)');
+    });
+
+    const badge = document.getElementById('captionsRatioBadge');
+    if (badge) {
+      badge.textContent = label(film.activeRatio);
+      badge.title = `Editing the ${label(film.activeRatio)} captions of "${film.name}". `
+        + 'Each ratio keeps its own line breaks.';
+    }
   }
 
   // --- Left Captions Sidebar ---
@@ -895,20 +977,64 @@ document.addEventListener('DOMContentLoaded', async () => {
     const note = document.getElementById('exportBackendNote');
     let running = false;
 
+    const ratioPicker = document.getElementById('exportRatioPicker');
+    const ratioBoxes = () => Array.from(ratioPicker.querySelectorAll('input[type=checkbox]'));
+    const chosenRatios = () => ratioBoxes().filter(b => b.checked).map(b => b.value);
+
+    /**
+     * The ratios are caption variants of one edit, so a render run is "these
+     * shapes of this film" — each gets its own pass and its own file.
+     */
+    function updateRatioPicker() {
+      const film = project.getActive();
+      if (!film) return;
+      ratioBoxes().forEach(box => {
+        const count = box.value === film.activeRatio
+          ? subManager.getSubtitles().length
+          : project.captionCount(film.id, box.value);
+        const counter = box.parentElement.querySelector('.ratio-check-count');
+        if (counter) counter.textContent = count ? String(count) : '—';
+        // An empty ratio would render a file of nothing but transparency.
+        box.disabled = count === 0;
+        if (count === 0) box.checked = false;
+        box.parentElement.title = count
+          ? `${count} caption${count === 1 ? '' : 's'} in this ratio`
+          : 'No captions in this ratio yet';
+      });
+    }
+
+    function ratioSpan(film, ratioId) {
+      const subs = ratioId === film.activeRatio
+        ? subManager.getSubtitles()
+        : film.ratios[ratioId].subtitles;
+      if (rangeSelect.value !== 'captions') return playerController.getDuration();
+      if (subs.length === 0) return 0;
+      return Math.max(0, Math.max(...subs.map(x => x.end)) - Math.min(...subs.map(x => x.start)));
+    }
+
     function updateEstimate() {
       const estimate = document.getElementById('exportFrameEstimate');
-      let span;
-      if (rangeSelect.value === 'captions') {
-        const r = exporter.getCaptionRange();
-        span = Math.max(0, r.end - r.start);
-      } else {
-        span = playerController.getDuration();
+      const info = document.getElementById('exportResInfo');
+      const film = project.getActive();
+      const ratios = chosenRatios();
+      const presets = playerController.getAspectPresets();
+
+      if (info) {
+        info.textContent = ratios.length
+          ? ratios.map(r => `${presets[r].width}×${presets[r].height}`).join(', ')
+          : 'Nothing selected';
       }
-      const frames = Math.ceil(span * FPS);
+
+      const frames = film
+        ? ratios.reduce((sum, r) => sum + Math.ceil(ratioSpan(film, r) * FPS), 0)
+        : 0;
       estimate.textContent = frames > 0
-        ? `${frames} frames (${span.toFixed(2)}s)`
+        ? `${frames} frames across ${ratios.length} render${ratios.length === 1 ? '' : 's'}`
         : 'No captions to render';
       startBtn.disabled = frames <= 0;
+      startBtn.textContent = ratios.length > 1
+        ? `Render ${ratios.length} Exports`
+        : 'Render Export';
     }
 
     function updateBackendNote() {
@@ -925,6 +1051,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function openModal() {
+      updateRatioPicker();
+      // Default to the ratio on screen, if it has anything in it.
+      const film = project.getActive();
+      ratioBoxes().forEach(box => {
+        box.checked = !box.disabled && film && box.value === film.activeRatio;
+      });
+      if (chosenRatios().length === 0) {
+        ratioBoxes().forEach(box => { box.checked = !box.disabled; });
+      }
       updateEstimate();
       updateBackendNote();
       progressWrap.classList.add('hidden');
@@ -945,11 +1080,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     cancelBtn.addEventListener('click', closeModal);
     modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
     rangeSelect.addEventListener('change', updateEstimate);
-    playerController.onProjectChange(updateEstimate);
-    subManager.onChange(() => { if (!modal.classList.contains('hidden')) updateEstimate(); });
+    ratioPicker.addEventListener('change', updateEstimate);
+    document.getElementById('btnExportAllRatios').addEventListener('click', () => {
+      ratioBoxes().forEach(box => { box.checked = !box.disabled; });
+      updateEstimate();
+    });
+    playerController.onProjectChange(() => {
+      if (!modal.classList.contains('hidden')) updateEstimate();
+    });
+    subManager.onChange(() => {
+      if (modal.classList.contains('hidden')) return;
+      updateRatioPicker();
+      updateEstimate();
+    });
 
     startBtn.addEventListener('click', async () => {
       if (running) return;
+      const ratios = chosenRatios();
+      if (ratios.length === 0) return;
+
       running = true;
       playerController.pause();
       startBtn.disabled = true;
@@ -957,34 +1106,60 @@ document.addEventListener('DOMContentLoaded', async () => {
       progressBar.style.width = '0%';
       progressText.textContent = 'Preparing…';
 
-      try {
-        const result = await exporter.export({
-          rangeMode: rangeSelect.value,
-          profile: parseInt(profileSelect.value, 10),
-          padStart: 0.5,
-          filename: exportName('_alpha.mov'),
-          onFontWarning: (missing) => {
-            toast(`"${missing.join(', ')}" is not available — the export will use the fallback typeface.`, 'warn', 7000);
-          },
-          onProgress: (done, total, phase) => {
-            const pct = total ? Math.round((done / total) * 100) : 0;
-            progressBar.style.width = `${pct}%`;
-            progressText.textContent = `${phase} — ${done}/${total} (${pct}%)`;
-          }
-        });
+      const film = project.getActive();
+      const startedOn = film.activeRatio;
+      const done = [];
+      let warnedFonts = false;
 
-        if (result.mode === 'prores') {
-          toast(`ProRes 4444 with alpha written to:\n${result.path}`, 'success', 9000);
-        } else {
-          toast(`Exported ${result.frames} transparent PNG frames as a ZIP.\nSee ENCODE_TO_PRORES.txt inside for the ffmpeg command.`, 'success', 9000);
+      try {
+        // Each ratio is rendered by actually switching the editor to it. The
+        // exporter draws with the same code as the Program Monitor, so routing
+        // the batch through the real switch is what keeps every file in the set
+        // a true match for what the operator approved on screen.
+        for (let i = 0; i < ratios.length; i++) {
+          if (film.activeRatio !== ratios[i]) switchRatio(ratios[i]);
+          await new Promise(r => requestAnimationFrame(r));
+
+          const label = ratios[i].replace('x', ':');
+          const result = await exporter.export({
+            rangeMode: rangeSelect.value,
+            profile: parseInt(profileSelect.value, 10),
+            padStart: 0.5,
+            filename: exportName('_alpha.mov', ratios[i]),
+            onFontWarning: (missing) => {
+              if (warnedFonts) return;
+              warnedFonts = true;
+              toast(`"${missing.join(', ')}" is not available — the export will use the fallback typeface.`, 'warn', 7000);
+            },
+            onProgress: (frameDone, total, phase) => {
+              const pct = total ? Math.round((frameDone / total) * 100) : 0;
+              progressBar.style.width = `${pct}%`;
+              progressText.textContent = ratios.length > 1
+                ? `${label} (${i + 1}/${ratios.length}) — ${phase} ${frameDone}/${total} (${pct}%)`
+                : `${phase} — ${frameDone}/${total} (${pct}%)`;
+            }
+          });
+          done.push({ ratio: label, result });
         }
+
+        const paths = done.filter(d => d.result.mode === 'prores').map(d => `${d.ratio}: ${d.result.path}`);
+        toast(paths.length
+          ? `ProRes 4444 with alpha written:\n${paths.join('\n')}`
+          : `Exported ${done.length} transparent PNG sequence${done.length === 1 ? '' : 's'} as ZIP`
+            + `${done.length === 1 ? '' : 's'}.\nSee ENCODE_TO_PRORES.txt inside for the ffmpeg command.`,
+          'success', 9000);
         modal.classList.add('hidden');
       } catch (err) {
         progressText.textContent = err.message;
         note.className = 'export-note err';
-        note.textContent = err.message;
+        note.textContent = done.length
+          ? `${err.message} (${done.length} of ${ratios.length} ratios were written before this.)`
+          : err.message;
         toast(`Export failed: ${err.message}`, 'error', 8000);
       } finally {
+        // Put the operator back on the ratio they were editing, whatever
+        // happened — a failed batch must not leave them in a different frame.
+        if (film.activeRatio !== startedOn) switchRatio(startedOn);
         running = false;
         startBtn.disabled = false;
         playerController.renderOverlay();
@@ -1098,13 +1273,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     if (opts.replace === false) {
+      // Appending is an edit to the ratio in hand, not a fresh transcript, so
+      // it stays where it was made.
       const existing = subManager.getSubtitles().map(s => ({ start: s.start, end: s.end, text: s.text }));
       subManager.setSubtitles([...existing, ...captions]);
+      timelineController.resizeAndDraw();
     } else {
-      subManager.setSubtitles(captions);
+      // One soundtrack, so every deliverable shape starts from the same words
+      // and is re-flowed from there.
+      setCaptionsEverywhere(captions);
     }
 
-    timelineController.resizeAndDraw();
     return captions.length;
   }
 
@@ -1425,40 +1604,108 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (files.length) relinkMedia(files);
     });
 
+    document.getElementById('btnCopyCaptionsToRatios')
+      .addEventListener('click', copyCaptionsToOtherRatios);
+    document.getElementById('btnCopyStyleToRatios')
+      .addEventListener('click', copyStyleToOtherRatios);
+
     subManager.onChange(() => {
       if (!swappingFilm) project.markDirty();
       renderFilmTabs();   // the tab shows a live caption count
-      scheduleAutosave();
-    });
-
-    playerController.onProjectChange(() => {
-      if (swappingFilm) return;
-      const film = project.getActive();
-      if (film) film.aspectId = playerController.project.id;
-      project.markDirty();
-      renderFilmTabs();
+      renderRatioUI();
       scheduleAutosave();
     });
 
     playerController.onPresetChange((preset) => {
       if (swappingFilm) return;
-      const film = project.getActive();
-      if (film) film.preset = { ...preset };
+      const ratio = project.getActiveRatio();
+      if (ratio) ratio.preset = { ...preset };
       project.markDirty();
       scheduleAutosave();
     });
   }
 
+  // --- pushing one ratio's work over the others ---------------------------
+  /**
+   * Ratios diverge on purpose — a 9:16 frame wants shorter lines than a 16:9
+   * one. These two are the way back when a correction should not be retyped
+   * four times, so both confirm before overwriting.
+   */
+  function copyCaptionsToOtherRatios() {
+    const film = project.getActive();
+    if (!film) return;
+    const count = subManager.getSubtitles().length;
+    if (count === 0) {
+      toast('There are no captions in this ratio to copy.', 'warn');
+      return;
+    }
+    const from = film.activeRatio.replace('x', ':');
+    if (!confirm(
+      `Replace the captions in the other three aspect ratios with these ${count} `
+      + `${from} lines? Their own line breaks and timing edits are lost.`)) return;
+
+    captureActiveFilm();
+    const touched = project.copyCaptionsToOtherRatios(film.id, film.activeRatio);
+    renderRatioUI();
+    scheduleAutosave();
+    toast(`Copied ${count} captions from ${from} into ${touched} other ratios.`, 'success', 6000);
+  }
+
+  function copyStyleToOtherRatios() {
+    const film = project.getActive();
+    if (!film) return;
+    const from = film.activeRatio.replace('x', ':');
+    if (!confirm(`Apply the ${from} caption style to the other three aspect ratios?`)) return;
+
+    captureActiveFilm();
+    const touched = project.copyStyleToOtherRatios(film.id, film.activeRatio);
+    scheduleAutosave();
+    toast(`Applied the ${from} style to ${touched} other ratios.`, 'success');
+  }
+
+  /**
+   * Captions that come from the soundtrack — a transcription, an imported
+   * subtitle file — are written into every ratio, because there is one set of
+   * words per edit. Hand edits stay in the ratio they were made in.
+   */
+  function setCaptionsEverywhere(captions) {
+    const film = project.getActive();
+    if (!film) return 0;
+
+    project.setCaptionsAllRatios(film.id, captions);
+    swappingFilm = true;
+    try {
+      subManager.selectedId = null;
+      subManager.setSubtitles(film.ratios[film.activeRatio].subtitles);
+    } finally {
+      swappingFilm = false;
+    }
+    project.markDirty();
+    timelineController.resizeAndDraw();
+    renderRatioUI();
+    scheduleAutosave();
+    return captions.length;
+  }
+
   // --- capture / apply ----------------------------------------------------
-  /** Reads the live editor state back into the film record it belongs to. */
+  /**
+   * Reads the live editor state back where it belongs: the captions, style and
+   * guide choice into the ratio variant on screen, everything that comes from
+   * the soundtrack — media, transcription, segmentation, transport — onto the
+   * film itself.
+   */
   function captureActiveFilm() {
     const film = project.getActive();
     if (!film) return null;
 
-    film.subtitles = subManager.getSubtitles().map(sub => ({ ...sub }));
-    film.selectedId = subManager.selectedId;
-    film.aspectId = playerController.project.id;
-    film.preset = { ...playerController.activePreset };
+    const ratio = film.ratios[film.activeRatio];
+    if (ratio) {
+      ratio.subtitles = subManager.getSubtitles().map(sub => ({ ...sub }));
+      ratio.selectedId = subManager.selectedId;
+      ratio.preset = { ...playerController.activePreset };
+      ratio.guides = currentGuideSetId();
+    }
+
     film.zoom = timelineController.zoomLevel;
     film.playhead = playerController.getCurrentTime();
     film.transcription = lastTranscription;
@@ -1503,17 +1750,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       timelineController.setWaveform(null, 0);
     }
 
-    setAspect(film.aspectId);
-    playerController.setPreset(film.preset);
-    applyPresetToUI(film.preset);
-    syncPresetSelect(film.preset);
-
-    subManager.selectedId = null;
-    subManager.setSubtitles(film.subtitles);
-    if (film.selectedId && subManager.getSubtitles().some(sub => sub.id === film.selectedId)) {
-      subManager.selectSubtitle(film.selectedId);
-    }
-
     lastTranscription = film.transcription || null;
     writeSegmentUI(film.segment);
 
@@ -1521,9 +1757,57 @@ document.addEventListener('DOMContentLoaded', async () => {
     zoomSlider.value = film.zoom;
     timelineController.setZoom(film.zoom);
 
-    timelineController.resizeAndDraw();
+    applyRatioState(film, film.activeRatio);
+
     playerController.seek(film.playhead || 0);
+  }
+
+  /**
+   * Points the frame, the captions, the style and the guides at one ratio of
+   * the film already on screen. The media and the transcription do not move —
+   * they belong to the edit, and only the deliverable shape is changing.
+   */
+  function applyRatioState(film, ratioId) {
+    const ratio = film.ratios[ratioId];
+    if (!ratio) return;
+
+    playerController.setAspectRatio(ratioId);
+    playerController.setPreset(ratio.preset);
+    applyPresetToUI(ratio.preset);
+    syncPresetSelect(ratio.preset);
+
+    subManager.selectedId = null;
+    subManager.setSubtitles(ratio.subtitles);
+    if (ratio.selectedId && subManager.getSubtitles().some(sub => sub.id === ratio.selectedId)) {
+      subManager.selectSubtitle(ratio.selectedId);
+    }
+
+    populateGuideSelect(ratioId, ratio.guides);
+    renderGuides();
+
+    timelineController.resizeAndDraw();
     playerController.renderOverlay();
+  }
+
+  /**
+   * Switches which aspect ratio of the current film is being captioned. The
+   * ratio being left is read back first, so its own line breaks survive.
+   */
+  function switchRatio(ratioId) {
+    const film = project.getActive();
+    if (!film || !film.ratios[ratioId]) return;
+    if (film.activeRatio === ratioId) return;
+
+    captureActiveFilm();
+    swappingFilm = true;
+    try {
+      film.activeRatio = ratioId;
+      applyRatioState(film, ratioId);
+    } finally {
+      swappingFilm = false;
+    }
+    renderRatioUI();
+    scheduleAutosave();
   }
 
   /** Keeps the preset dropdown pointing at the film's style where it can. */
@@ -1576,12 +1860,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function addFilm() {
     captureActiveFilm();
+    const current = project.getActive();
+    // A new edit inherits the look you were just working in — within one job
+    // the caption style is normally the constant and the cut is what changes —
+    // and it inherits it in every ratio, since the new film has all four too.
+    const ratios = {};
+    RATIO_IDS.forEach(rid => {
+      ratios[rid] = { preset: { ...current.ratios[rid].preset }, guides: current.ratios[rid].guides };
+    });
+
     const film = project.addFilm({
       name: project.uniqueName(`Film ${project.getFilms().length + 1}`),
-      // A new edit inherits the look you were just working in: within one job
-      // the caption style is normally the constant and the cut is what changes.
-      preset: { ...playerController.activePreset },
-      aspectId: playerController.project.id,
+      ratios: ratios,
+      activeRatio: current.activeRatio,
       segment: readSegmentUI()
     });
     project.setActive(film.id);
@@ -1625,10 +1916,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    const count = filmId === project.activeId
-      ? subManager.getSubtitles().length
-      : film.subtitles.length;
-    if (!confirm(`Delete "${film.name}" and its ${count} caption${count === 1 ? '' : 's'}? This cannot be undone.`)) {
+    if (filmId === project.activeId) captureActiveFilm();
+    const total = RATIO_IDS.reduce((sum, rid) => sum + project.captionCount(filmId, rid), 0);
+    const shapes = project.populatedRatios(filmId).length;
+    if (!confirm(`Delete "${film.name}"? That removes ${total} caption${total === 1 ? '' : 's'} `
+      + `across ${shapes} aspect ratio${shapes === 1 ? '' : 's'}. This cannot be undone.`)) {
       return;
     }
 
@@ -1952,6 +2244,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // --- film bar rendering -------------------------------------------------
   function renderProjectUI() {
     renderFilmTabs();
+    renderRatioUI();
     renderProjectChip();
     renderRelinkBanner();
   }
@@ -1966,8 +2259,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       const isActive = film.id === project.activeId;
       // The active film's captions live in the manager, not the record, so read
       // the count from there or a tab lags a caption behind every edit.
-      const count = isActive ? subManager.getSubtitles().length : film.subtitles.length;
-      const aspect = (playerController.getAspectPresets()[film.aspectId] || {}).label || film.aspectId;
+      const count = isActive
+        ? subManager.getSubtitles().length
+        : project.captionCount(film.id, film.activeRatio);
+      const shapes = project.populatedRatios(film.id).length;
       const unlinked = !!(film.media && film.media.name) && !hasLiveMedia(film.id);
 
       const tab = document.createElement('button');
@@ -1976,7 +2271,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       tab.dataset.id = film.id;
       tab.setAttribute('role', 'tab');
       tab.setAttribute('aria-selected', String(isActive));
-      tab.title = `${film.name} — ${aspect}, ${count} caption${count === 1 ? '' : 's'}`
+      tab.title = `${film.name} — captioned in ${shapes} of 4 aspect ratios`
+        + `\nEditing ${film.activeRatio.replace('x', ':')}: ${count} caption${count === 1 ? '' : 's'}`
         + (unlinked ? `\nMedia "${film.media.name}" is not linked in this session.` : '')
         + '\nDouble-click to rename.';
 
@@ -1987,7 +2283,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const meta = document.createElement('span');
       meta.className = 'film-tab-meta';
-      meta.textContent = `${String(film.aspectId || '').replace('x', ':')} · ${count}`;
+      meta.textContent = `${film.activeRatio.replace('x', ':')} · ${count}`;
       tab.appendChild(meta);
 
       if (unlinked) {
@@ -2142,10 +2438,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         case '?':
           document.getElementById('shortcutsModal').classList.toggle('hidden');
           break;
-        case '1': setAspect('16x9'); break;
-        case '2': setAspect('1x1'); break;
-        case '3': setAspect('4x5'); break;
-        case '4': setAspect('9x16'); break;
+        case '1': switchRatio('16x9'); break;
+        case '2': switchRatio('1x1'); break;
+        case '3': switchRatio('4x5'); break;
+        case '4': switchRatio('9x16'); break;
         case '+':
         case '=': zoomBy(15); break;
         case '-':

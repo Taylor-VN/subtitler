@@ -1,21 +1,33 @@
 /**
- * Project & Film model.
+ * Project, Film & Ratio model.
  *
- * A *project* is one job — a client deliverable, a campaign, an episode. Inside
- * it sits a list of *films*: separate edits, each with its own media, captions,
- * caption style and aspect ratio. The aspect ratio stays a per-film property,
- * exactly as it was when the app held a single film; a film is not a "render of
- * another film at a different ratio", it is its own edit with its own audio.
+ * A *project* is one job — a client deliverable, a campaign, an episode.
+ * Inside it sits a list of *films*: the separate edits delivered for that job,
+ * each with its own media and its own transcription.
  *
- * This class owns only serialisable state. The live File handles, object URLs
- * and decoded waveforms are session-only and live beside it in app.js, keyed by
- * film id — a project file has to stay a few hundred kilobytes of text, not a
+ * A film is not tied to an aspect ratio. Every film carries a *ratio variant*
+ * for each deliverable shape, and each variant holds its own captions, caption
+ * style and safe-area guides. That is the point: one edit is cut for 16:9 and
+ * for 9:16, and the same words have to be re-flowed for each frame — shorter
+ * lines and a higher margin in vertical, longer lines in landscape. So the
+ * captions are edited per ratio and the film exports in every ratio.
+ *
+ * Generated captions (a transcription, an imported SRT) are written to every
+ * ratio at once, because they come from one soundtrack. Hand edits — typing,
+ * splitting, dragging a clip — only touch the ratio being edited.
+ *
+ * This class owns only serialisable state. Live File handles, object URLs and
+ * decoded waveforms are session-only and live beside it in app.js, keyed by
+ * film id: a project file has to stay a few hundred kilobytes of text, not a
  * copy of the rushes.
  */
 
 const PROJECT_FORMAT = 'taylors-transcriber-project';
-const PROJECT_VERSION = 1;
+const PROJECT_VERSION = 2;
 const PROJECT_EXT = '.ttproj';
+
+// Must match ASPECT_PRESETS in videoPlayer.js. Order is the tab order.
+const RATIO_IDS = ['16x9', '1x1', '4x5', '9x16'];
 
 function projectUid(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -25,7 +37,7 @@ class ProjectManager {
   /**
    * @param {Object} opts
    * @param {number} opts.fps
-   * @param {Object} opts.defaultPreset  style a brand-new film starts from
+   * @param {Object} opts.defaultPreset  style a brand-new ratio starts from
    */
   constructor(opts = {}) {
     this.fps = opts.fps || 25;
@@ -74,20 +86,34 @@ class ProjectManager {
     return this;
   }
 
+  /** One deliverable shape within a film: its captions, its style, its guides. */
+  makeRatio(init = {}) {
+    return {
+      subtitles: Array.isArray(init.subtitles) ? init.subtitles.map(s => ({ ...s })) : [],
+      selectedId: init.selectedId || null,
+      preset: init.preset ? { ...init.preset } : { ...this.defaultPreset },
+      guides: init.guides || 'generic'
+    };
+  }
+
   /** A blank film record. Everything a film owns is on this object. */
   makeFilm(init = {}) {
+    const ratios = {};
+    RATIO_IDS.forEach(id => {
+      ratios[id] = this.makeRatio((init.ratios && init.ratios[id]) || {});
+    });
+
     return {
       id: init.id || projectUid('film'),
       name: init.name || `Film ${this.films.length + 1}`,
-      aspectId: init.aspectId || '16x9',
-      preset: init.preset ? { ...init.preset } : { ...this.defaultPreset },
-      subtitles: Array.isArray(init.subtitles) ? init.subtitles.map(s => ({ ...s })) : [],
-      selectedId: init.selectedId || null,
+      ratios: ratios,
+      activeRatio: RATIO_IDS.includes(init.activeRatio) ? init.activeRatio : '16x9',
       // Descriptor only — the File itself cannot live in a text project file,
       // so re-opening a project asks for the media to be relinked.
       media: init.media ? { ...init.media } : null,
       // The raw transcription, kept so the segmentation sliders can re-cut it
-      // in a later session without paying for another model run.
+      // in a later session without paying for another model run. It belongs to
+      // the film, not a ratio: there is one soundtrack.
       transcription: init.transcription || null,
       segment: {
         maxCharsPerLine: 42,
@@ -113,6 +139,25 @@ class ProjectManager {
     return this.getFilm(this.activeId) || this.films[0] || null;
   }
 
+  /** The ratio variant currently being edited in the given (or active) film. */
+  getRatio(film, ratioId) {
+    const target = film || this.getActive();
+    if (!target) return null;
+    return target.ratios[ratioId || target.activeRatio] || null;
+  }
+
+  getActiveRatio() {
+    return this.getRatio(this.getActive());
+  }
+
+  setActiveRatio(ratioId) {
+    const film = this.getActive();
+    if (!film || !film.ratios[ratioId] || film.activeRatio === ratioId) return false;
+    film.activeRatio = ratioId;
+    this.notify();
+    return true;
+  }
+
   activeIndex() {
     return Math.max(0, this.films.findIndex(f => f.id === this.activeId));
   }
@@ -125,23 +170,28 @@ class ProjectManager {
     return film;
   }
 
-  /**
-   * A full copy, captions included. This is the cheap route to "same dialogue,
-   * different ratio" without pretending a film owns a set of ratios: you get a
-   * second, independent edit that happens to start identical to the first.
-   */
+  /** A full copy — every ratio's captions and style — as an independent edit. */
   duplicateFilm(id) {
     const src = this.getFilm(id);
     if (!src) return null;
+
+    const ratios = {};
+    RATIO_IDS.forEach(rid => {
+      const from = src.ratios[rid];
+      ratios[rid] = this.makeRatio({
+        ...from,
+        // Fresh caption ids: two films must never share one, or selecting a
+        // line in one would highlight a line in the other.
+        subtitles: from.subtitles.map((s, i) => ({ ...s, id: `sub_${projectUid('c')}_${i}` })),
+        selectedId: null
+      });
+    });
 
     const copy = this.makeFilm({
       ...src,
       id: null,
       name: this.uniqueName(`${src.name} copy`),
-      // Fresh caption ids: two films must never share one, or selecting a line
-      // in one would highlight a line in the other.
-      subtitles: src.subtitles.map((s, i) => ({ ...s, id: `sub_${projectUid('c')}_${i}` })),
-      selectedId: null
+      ratios: ratios
     });
 
     this.films.splice(this.films.indexOf(src) + 1, 0, copy);
@@ -219,6 +269,76 @@ class ProjectManager {
     return true;
   }
 
+  // --- cross-ratio operations -------------------------------------------
+  /**
+   * Writes one caption list into every ratio of a film, giving each ratio its
+   * own copy with its own ids. This is the path a transcription or an imported
+   * subtitle file takes: one soundtrack, so every deliverable starts from the
+   * same words and is re-flowed from there.
+   */
+  setCaptionsAllRatios(filmId, captions) {
+    const film = this.getFilm(filmId);
+    if (!film) return 0;
+    RATIO_IDS.forEach(rid => {
+      film.ratios[rid].subtitles = captions.map((sub, i) => ({
+        ...sub,
+        id: `sub_${projectUid(rid)}_${i}`
+      }));
+      film.ratios[rid].selectedId = null;
+    });
+    this.dirty = true;
+    return RATIO_IDS.length;
+  }
+
+  /** Pushes one ratio's captions over the others — the "re-flow from here" tool. */
+  copyCaptionsToOtherRatios(filmId, fromRatioId) {
+    const film = this.getFilm(filmId);
+    const from = film && film.ratios[fromRatioId];
+    if (!from) return 0;
+    let touched = 0;
+    RATIO_IDS.forEach(rid => {
+      if (rid === fromRatioId) return;
+      film.ratios[rid].subtitles = from.subtitles.map((sub, i) => ({
+        ...sub,
+        id: `sub_${projectUid(rid)}_${i}`
+      }));
+      film.ratios[rid].selectedId = null;
+      touched++;
+    });
+    this.dirty = true;
+    this.notify();
+    return touched;
+  }
+
+  copyStyleToOtherRatios(filmId, fromRatioId) {
+    const film = this.getFilm(filmId);
+    const from = film && film.ratios[fromRatioId];
+    if (!from) return 0;
+    let touched = 0;
+    RATIO_IDS.forEach(rid => {
+      if (rid === fromRatioId) return;
+      film.ratios[rid].preset = { ...from.preset };
+      touched++;
+    });
+    this.dirty = true;
+    this.notify();
+    return touched;
+  }
+
+  /** Ratios of a film that actually carry captions — what "export all" means. */
+  populatedRatios(filmId) {
+    const film = this.getFilm(filmId);
+    if (!film) return [];
+    return RATIO_IDS.filter(rid => film.ratios[rid].subtitles.length > 0);
+  }
+
+  captionCount(filmId, ratioId) {
+    const film = this.getFilm(filmId);
+    if (!film) return 0;
+    const ratio = film.ratios[ratioId];
+    return ratio ? ratio.subtitles.length : 0;
+  }
+
   /** Films whose media descriptor has no live file attached in this session. */
   unlinkedFilms(hasFile) {
     return this.films.filter(f => f.media && f.media.name && !hasFile(f.id));
@@ -231,6 +351,20 @@ class ProjectManager {
    * `uncertain` list the review filter reads is small, so it stays.
    */
   toJSON() {
+    const ratioJson = (ratio) => ({
+      preset: ratio.preset,
+      guides: ratio.guides,
+      selectedId: ratio.selectedId,
+      subtitles: ratio.subtitles.map(s => ({
+        id: s.id,
+        start: s.start,
+        end: s.end,
+        text: s.text,
+        speaker: s.speaker || '',
+        uncertain: s.uncertain && s.uncertain.length ? s.uncertain : undefined
+      }))
+    });
+
     return {
       format: PROJECT_FORMAT,
       version: PROJECT_VERSION,
@@ -239,26 +373,21 @@ class ProjectManager {
       createdAt: this.createdAt,
       savedAt: new Date().toISOString(),
       activeFilmId: this.activeId,
-      films: this.films.map(f => ({
-        id: f.id,
-        name: f.name,
-        aspectId: f.aspectId,
-        preset: f.preset,
-        media: f.media,
-        segment: f.segment,
-        zoom: f.zoom,
-        playhead: f.playhead,
-        selectedId: f.selectedId,
-        transcription: f.transcription,
-        subtitles: f.subtitles.map(s => ({
-          id: s.id,
-          start: s.start,
-          end: s.end,
-          text: s.text,
-          speaker: s.speaker || '',
-          uncertain: s.uncertain && s.uncertain.length ? s.uncertain : undefined
-        }))
-      }))
+      films: this.films.map(f => {
+        const ratios = {};
+        RATIO_IDS.forEach(rid => { ratios[rid] = ratioJson(f.ratios[rid]); });
+        return {
+          id: f.id,
+          name: f.name,
+          activeRatio: f.activeRatio,
+          media: f.media,
+          segment: f.segment,
+          zoom: f.zoom,
+          playhead: f.playhead,
+          transcription: f.transcription,
+          ratios: ratios
+        };
+      })
     };
   }
 
@@ -267,19 +396,43 @@ class ProjectManager {
   }
 
   /**
+   * Format 1 gave each film a single aspect ratio with one caption list. The
+   * captions belong to the soundtrack, not the frame, so they are copied into
+   * every ratio and the film's old ratio becomes the one it opens on — the
+   * project reads the same as it did and gains the other three shapes.
+   */
+  static migrateV1Film(film) {
+    const ratios = {};
+    RATIO_IDS.forEach(rid => {
+      ratios[rid] = {
+        subtitles: (film.subtitles || []).map((s, i) => ({ ...s, id: `sub_${rid}_${i}` })),
+        selectedId: null,
+        preset: film.preset,
+        guides: 'generic'
+      };
+    });
+    return {
+      ...film,
+      ratios: ratios,
+      activeRatio: RATIO_IDS.includes(film.aspectId) ? film.aspectId : '16x9',
+      subtitles: undefined,
+      preset: undefined,
+      aspectId: undefined
+    };
+  }
+
+  /**
    * Replaces the whole project from parsed JSON. Throws with a readable message
    * rather than half-loading something that is not one of our files.
    */
   load(data) {
-    if (!data || typeof data !== 'object') {
+    if (!data || typeof data !== 'object' || data.format !== PROJECT_FORMAT) {
       throw new Error('That file is not a Taylor\'s Transcriber project.');
     }
-    if (data.format !== PROJECT_FORMAT) {
-      throw new Error('That file is not a Taylor\'s Transcriber project.');
-    }
-    if (Number(data.version) > PROJECT_VERSION) {
+    const version = Number(data.version) || 1;
+    if (version > PROJECT_VERSION) {
       throw new Error(
-        `This project was written by a newer version of the app (format ${data.version}). Update before opening it.`);
+        `This project was written by a newer version of the app (format ${version}). Update before opening it.`);
     }
     if (!Array.isArray(data.films) || data.films.length === 0) {
       throw new Error('That project file contains no films.');
@@ -289,7 +442,9 @@ class ProjectManager {
     this.createdAt = data.createdAt || new Date().toISOString();
     this.savedAt = data.savedAt || null;
     this.films = [];
-    data.films.forEach(f => this.films.push(this.makeFilm(f)));
+    data.films.forEach(f => {
+      this.films.push(this.makeFilm(version < 2 ? ProjectManager.migrateV1Film(f) : f));
+    });
 
     this.activeId = this.getFilm(data.activeFilmId) ? data.activeFilmId : this.films[0].id;
     this.dirty = false;
@@ -312,3 +467,4 @@ class ProjectManager {
 window.ProjectManager = ProjectManager;
 window.PROJECT_EXT = PROJECT_EXT;
 window.PROJECT_FORMAT = PROJECT_FORMAT;
+window.RATIO_IDS = RATIO_IDS;

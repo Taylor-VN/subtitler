@@ -90,18 +90,37 @@ sequence plus the exact ffmpeg command to convert it yourself.
 ## Projects and films
 
 A **project** is one job. Inside it sits a list of **films** — the separate
-edits you are delivering for that job: a 60, a 30, a square social cut. Each
-film owns its own media, its own captions, its own caption style and its own
-aspect ratio. A film is not a re-render of another film at a different ratio,
-so nothing is shared between them and editing one never disturbs another.
+edits you are delivering for that job: a 60, a 30, a different cut. Each film
+owns its own media and its own transcription.
+
+A film is **not** tied to an aspect ratio. Every film carries a caption set for
+each of the four ratios, so one edit is delivered in all of them. The ratio
+buttons over the program monitor (and `1`–`4`) choose which of those caption
+sets you are editing; each keeps its own line breaks, its own timing tweaks,
+its own caption style and its own safe-area guides. That is the point — a 9:16
+frame wants shorter lines and a higher margin than a 16:9 one, from the same
+words.
+
+Which captions are shared and which are not follows one rule:
+
+| Where captions come from | Where they land |
+| --- | --- |
+| Transcription, imported SRT/VTT/JSON | **every ratio** — one soundtrack, one set of words |
+| Typing, splitting, merging, dragging a clip, ripple delete, Clear all | **the ratio you are in** |
+
+When a fix does need to travel, the copy button in the Captions panel header
+pushes the current ratio's captions over the other three, and **To all ratios**
+in the Style panel does the same for the caption style. Both ask first, because
+both discard the other ratios' work.
 
 The strip under the toolbar is the film list. Click a tab to switch to that
-edit — the program monitor, the caption list, the timeline, the style inspector
-and the aspect buttons all repoint to it at once. `[` and `]` step through the
-tabs. Double-click a tab to rename it, and the `+` at the end adds a film.
+edit — the program monitor, the caption list, the timeline and the style
+inspector all repoint to it at once. `[` and `]` step through the tabs.
+Double-click a tab to rename it, and the `+` at the end adds a film.
 
-**Project → Duplicate Film** copies an edit whole — captions, style, ratio, and
-the media link — which is the quick way to start a second cut from the first.
+**Project → Duplicate Film** copies an edit whole — every ratio's captions and
+style, plus the media link — which is the quick way to start a second cut from
+the first.
 
 ### Saving a project
 
@@ -110,9 +129,12 @@ the media link — which is the quick way to start a second cut from the first.
 overwrites it silently. `Ctrl/⌘ O` opens one, and a `.ttproj` dropped on the
 program monitor opens too.
 
-The file is plain JSON and holds the captions, per-film aspect ratio and style,
-the segmentation settings and the raw transcription — so the segmentation
-sliders still re-cut an old job without re-running a model.
+The file is plain JSON and holds every ratio's captions, style and guide choice
+for every film, plus the segmentation settings and the raw transcription — so
+the segmentation sliders still re-cut an old job without re-running a model.
+Projects written by the earlier single-ratio format open too: the film's old
+ratio becomes the one it opens on, and its captions are copied into the other
+three so it gains the remaining shapes.
 
 **It does not hold the video.** A project file has to stay a text file rather
 than a copy of the rushes, so a reopened project shows *n films need media* in
@@ -121,9 +143,9 @@ to the films by filename first, then whatever is left is handed to the still-
 waiting films in order, so a renamed file does not leave you stuck. One file can
 back several films, which is what a duplicated edit needs.
 
-Exports are named from the job and the edit — `Acme_Launch_Hero_60.srt` — so a
-folder of deliverables from several films cannot collapse into one
-`subtitles.srt` overwriting itself.
+Exports are named from the job, the edit and the ratio —
+`Acme_Launch_Hero_60_9x16.srt` — so a folder of deliverables cannot collapse
+into one `subtitles.srt` overwriting itself.
 
 The current project is also autosaved to the browser's local storage after every
 edit and reopened at launch, so closing the app does not lose work that was
@@ -139,11 +161,55 @@ it holds one project and lives with the app, not with the job.
 | 4:5 | 1080 × 1350 | key `3` |
 | 9:16 | 1080 × 1920 | key `4` |
 
+Each button carries the number of captions that ratio holds, so you can see at
+a glance which shapes of a film are finished.
+
 Everything is drawn at the project resolution and the preview is a scaled copy
 of it, so the Program Monitor is pixel-for-pixel what gets exported. Preset
 style values (font size, margins, stroke, shadow) are referenced to a
-1080-pixel-tall frame and scaled, so a preset looks proportionally the same in
-every ratio.
+1080-pixel-tall frame and scaled, so a style looks proportionally the same in
+every ratio before you tune it for one.
+
+### Exporting every ratio at once
+
+The ProRes + alpha dialog opens on a row of ratio checkboxes. Tick as many as
+you like — **All with captions** selects every ratio that has any — and one
+render run writes one file per ratio, each named for it. Ratios with no
+captions are disabled rather than silently rendering a file of pure
+transparency.
+
+Each ratio is rendered by genuinely switching the editor to it, so every file
+in the set is drawn by the same code that drew the preview you approved. The
+editor returns to the ratio you started on when the run ends, including after
+a failure.
+
+## Safe areas
+
+`G` toggles the guides; the dropdown beside the button picks the set, and the
+choice is remembered per ratio — EBU on the 16:9 deliverable, TikTok on the
+vertical one — and saved with the project. Only sets that apply to the current
+ratio are offered.
+
+Two things are drawn. The solid box is the line to keep text inside. The
+hatched amber regions are where the platform's own interface sits on top of the
+video, which is a stronger claim than "might be cropped" — anything there is
+covered, not merely tight.
+
+| Set | Ratio | Basis |
+| --- | --- | --- |
+| Generic 5% / 10% | any | the old 4:3-era convention, kept as a neutral default |
+| EBU R95 | 16:9 | 3.5% graphics safe area, plus the 14:9 centre extraction |
+| YouTube | 16:9 | clear of the progress bar and the cards/share affordances |
+| YouTube Shorts | 9:16 | title and channel block, action rail |
+| Instagram Reels | 9:16 | 250 px top, 420 px bottom on 1080 × 1920 |
+| Instagram Stories | 9:16 | 250 px top and bottom on 1080 × 1920 |
+| TikTok | 9:16 | 130 top, 483 bottom, 44 left, 140 right on 1080 × 1920 |
+
+EBU R95 and the three with pixel figures come from the published specs. The
+three marked with an asterisk in the dropdown — Generic and both YouTube sets —
+are measured from the current interface instead. Apps redesign; re-check those
+before trusting them on a delivery. All of them live in one table at the top of
+`js/safeAreas.js`, so correcting a number is a one-line change.
 
 ## AI transcription
 
@@ -257,7 +323,7 @@ readout. Green, amber and red appear only as status, never as button fills.
 | `T` | Auto-transcribe |
 | `,` | Settings — manage models |
 | `E` | ProRes + alpha export |
-| `1`–`4` | Aspect ratio |
+| `1`–`4` | Edit this film's 16:9 / 1:1 / 4:5 / 9:16 captions |
 | `+` / `-` | Zoom timeline |
 | `[` / `]` | Previous / next film in the project |
 | `Ctrl/⌘ S` | Save project (`⇧` for Save As) |
@@ -282,7 +348,8 @@ js/captionSegmenter.js    word timings -> broadcast-style captions
 model_registry.py         model + runtime metadata, install-state detection
 engines.py                MLX/transformers/CTranslate2 adapters + forced aligner
 js/subtitleManager.js     caption store, timecodes, SRT/VTT/XML
-js/projectManager.js      project/film records, .ttproj serialisation
+js/projectManager.js      project/film/ratio records, .ttproj serialisation
+js/safeAreas.js           broadcast and social safe-area guide sets
 js/timeline.js            ruler, waveform, draggable clips, snapping
 js/presetParser.js        Premiere preset import/export
 js/app.js                 UI wiring
