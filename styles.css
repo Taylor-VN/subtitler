@@ -932,14 +932,119 @@ svg[viewBox]:not(.icon):not(.brand-icon) {
 .program-frame.has-media > #demoCanvas { display: none; }
 .program-frame > #demoCanvas.hidden { display: none; }
 
+/* Safe areas. The primary box is the line to stay inside; the tinted zones are
+   where the platform's own interface sits, which is a stronger claim than
+   "might be cropped" — so they are filled, not merely outlined. */
 .safe-guides { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
-.safe-guides .safe-action,
-.safe-guides .safe-title {
+
+.safe-guides .safe-primary,
+.safe-guides .safe-secondary {
   position: absolute;
-  border: 1px solid rgba(255, 255, 255, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.62);
 }
-.safe-guides .safe-action { inset: 5%; }
-.safe-guides .safe-title { inset: 10%; border-style: dashed; }
+
+.safe-guides .safe-secondary {
+  border-color: rgba(255, 255, 255, 0.26);
+  border-style: dashed;
+}
+
+/* Bottom-left, so it cannot collide with the set name in the top-left corner. */
+.safe-guides .safe-secondary[data-label]::after {
+  content: attr(data-label);
+  position: absolute;
+  bottom: 2px;
+  left: 3px;
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.safe-guides .safe-avoid {
+  position: absolute;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(224, 160, 50, 0.16) 0 6px,
+    rgba(224, 160, 50, 0.05) 6px 12px);
+  border: 1px solid rgba(224, 160, 50, 0.32);
+}
+
+.safe-guides .safe-tag {
+  position: absolute;
+  top: var(--s2);
+  left: var(--s2);
+  padding: 1px var(--s2);
+  border-radius: var(--r-sm);
+  background: rgba(0, 0, 0, 0.62);
+  color: rgba(255, 255, 255, 0.8);
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.02em;
+}
+
+/* A guide set measured off a live app, not published by it. The asterisk is
+   the whole warning: interfaces move, so re-check before trusting it. */
+.safe-guides .safe-tag.practical::after {
+  content: ' *';
+  color: var(--warn);
+}
+
+.select-guides {
+  max-width: 168px;
+  height: 24px;
+  font-size: var(--fs-sm);
+}
+
+/* Caption count carried on each ratio button: the ratios are caption variants
+   inside one film, so how many lines each holds is the useful thing to show. */
+.aspect-count {
+  margin-left: 4px;
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  color: var(--text-dim);
+}
+.aspect-btn.active .aspect-count { color: rgba(255, 255, 255, 0.7); }
+.aspect-count:empty { display: none; }
+
+.ratio-badge {
+  padding: 1px var(--s2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+}
+
+.export-row-top { align-items: flex-start; }
+
+.export-ratios {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.ratio-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-input);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ratio-check:hover { border-color: var(--border-strong); color: var(--text); }
+.ratio-check input { margin: 0; }
+.ratio-check em {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  font-style: normal;
+  color: var(--text-dim);
+}
+.ratio-check em:empty { display: none; }
 
 .dropzone-overlay {
   position: absolute;

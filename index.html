@@ -212,7 +212,9 @@
     <section class="panel panel-left" id="panelCaptions">
       <div class="panel-header">
         <div class="panel-title">Captions</div>
+        <span id="captionsRatioBadge" class="ratio-badge" title="Captions are edited per aspect ratio — this is the one on screen">16:9</span>
         <div class="panel-actions">
+          <button id="btnCopyCaptionsToRatios" class="btn-icon" title="Copy these captions over the other aspect ratios"><svg class="icon"><use href="#i-copy"/></svg></button>
           <button id="btnAddSubtitle" class="btn-icon" title="Add a caption at the playhead"><svg class="icon"><use href="#i-plus"/></svg></button>
           <button id="btnSplitSubtitle" class="btn-icon" title="Split the selected caption at the playhead (C)"><svg class="icon"><use href="#i-split"/></svg></button>
           <button id="btnMergeSubtitle" class="btn-icon" title="Merge the selected caption with the next"><svg class="icon"><use href="#i-merge"/></svg></button>
@@ -238,12 +240,12 @@
     <section class="panel panel-center" id="panelPreview">
       <div class="panel-header">
         <div class="panel-title">Program</div>
-        <div class="aspect-ratio-bar" role="group" aria-label="Project aspect ratio">
-          <span class="aspect-label">Aspect:</span>
-          <button class="aspect-btn active" data-aspect="16x9" title="16:9 Landscape — 1920×1080">16:9</button>
-          <button class="aspect-btn" data-aspect="1x1" title="1:1 Square — 1080×1080">1:1</button>
-          <button class="aspect-btn" data-aspect="4x5" title="4:5 Portrait — 1080×1350">4:5</button>
-          <button class="aspect-btn" data-aspect="9x16" title="9:16 Vertical — 1080×1920">9:16</button>
+        <div class="aspect-ratio-bar" role="group" aria-label="Aspect ratio being captioned">
+          <span class="aspect-label">Ratio:</span>
+          <button class="aspect-btn active" data-aspect="16x9" title="16:9 Landscape — 1920×1080">16:9<span class="aspect-count"></span></button>
+          <button class="aspect-btn" data-aspect="1x1" title="1:1 Square — 1080×1080">1:1<span class="aspect-count"></span></button>
+          <button class="aspect-btn" data-aspect="4x5" title="4:5 Portrait — 1080×1350">4:5<span class="aspect-count"></span></button>
+          <button class="aspect-btn" data-aspect="9x16" title="9:16 Vertical — 1080×1920">9:16<span class="aspect-count"></span></button>
           <span id="projectResLabel" class="project-res">1920×1080</span>
         </div>
         <div class="panel-info" id="mediaInfoLabel">Sample Video Demo</div>
@@ -261,11 +263,10 @@
           <!-- Subtitle Overlay Canvas (backing store == project resolution) -->
           <canvas id="subtitleCanvas"></canvas>
 
-          <!-- Title/action safe guides -->
-          <div class="safe-guides hidden" id="safeGuides">
-            <div class="safe-action"></div>
-            <div class="safe-title"></div>
-          </div>
+          <!-- Safe-area guides. Populated by js/safeAreas.js from the guide set
+               chosen for this ratio, so the boxes match the platform, not a
+               single 4:3-era convention. -->
+          <div class="safe-guides hidden" id="safeGuides"></div>
         </div>
 
         <!-- Video Dropzone Overlay -->
@@ -315,7 +316,9 @@
               <option value="2.0">2.0x</option>
             </select>
           </label>
-          <button id="btnSafeGuides" class="btn-transport" title="Toggle Title / Action Safe Guides (G)">
+          <select id="safeGuideSelect" class="select-sm select-guides"
+                  title="Which safe-area guides to draw for this ratio"></select>
+          <button id="btnSafeGuides" class="btn-transport" title="Toggle safe-area guides (G)">
             <svg class="icon"><use href="#i-guides"/></svg>
           </button>
           <button id="btnFullscreen" class="btn-transport" title="Toggle Fullscreen Program Monitor (F)">
@@ -337,6 +340,7 @@
           <div class="preset-select-header">
             <label class="group-label">Preset</label>
             <div class="preset-action-btns">
+              <button id="btnCopyStyleToRatios" class="btn-xs btn-outline" title="Copy this style to the other aspect ratios">To all ratios</button>
               <button id="btnResetStyle" class="btn-xs btn-outline" title="Reset to Preset Default">Reset</button>
               <button id="btnSaveCustomPreset" class="btn-xs btn-primary" title="Save Current Style as New Preset">+ Save</button>
             </div>
@@ -603,11 +607,11 @@
         <div class="shortcut-row"><kbd>R</kbd> <span>Toggle Subtitle Loop Region</span></div>
         <div class="shortcut-row"><kbd>F</kbd> <span>Toggle Fullscreen Program Monitor</span></div>
         <div class="shortcut-row"><kbd>M</kbd> <span>Toggle Audio Mute</span></div>
-        <div class="shortcut-row"><kbd>G</kbd> <span>Toggle Title / Action Safe Guides</span></div>
+        <div class="shortcut-row"><kbd>G</kbd> <span>Toggle safe-area guides (pick the set beside the button)</span></div>
         <div class="shortcut-row"><kbd>E</kbd> <span>Open ProRes 4444 + Alpha Export</span></div>
         <div class="shortcut-row"><kbd>T</kbd> <span>Auto-Transcribe with a Local AI Model</span></div>
         <div class="shortcut-row"><kbd>,</kbd> <span>Settings — Manage Transcription Models</span></div>
-        <div class="shortcut-row"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <span>Aspect Ratio: 16:9 / 1:1 / 4:5 / 9:16</span></div>
+        <div class="shortcut-row"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <span>Edit the 16:9 / 1:1 / 4:5 / 9:16 captions of this film</span></div>
         <div class="shortcut-row"><kbd>+</kbd> / <kbd>-</kbd> <span>Zoom Timeline In / Out</span></div>
         <div class="shortcut-row"><kbd>[</kbd> / <kbd>]</kbd> <span>Previous / Next Film in this Project</span></div>
         <div class="shortcut-row"><kbd>Ctrl/⌘ + S</kbd> <span>Save Project</span></div>
@@ -631,8 +635,19 @@
           Premiere Pro — the alpha channel is read automatically.
         </p>
 
+        <div class="export-row export-row-top">
+          <span class="export-lbl">Aspect ratios</span>
+          <div class="export-ratios" id="exportRatioPicker" role="group" aria-label="Aspect ratios to render">
+            <label class="ratio-check"><input type="checkbox" value="16x9" checked><span>16:9</span><em class="ratio-check-count"></em></label>
+            <label class="ratio-check"><input type="checkbox" value="1x1"><span>1:1</span><em class="ratio-check-count"></em></label>
+            <label class="ratio-check"><input type="checkbox" value="4x5"><span>4:5</span><em class="ratio-check-count"></em></label>
+            <label class="ratio-check"><input type="checkbox" value="9x16"><span>9:16</span><em class="ratio-check-count"></em></label>
+            <button type="button" id="btnExportAllRatios" class="btn-xs btn-outline">All with captions</button>
+          </div>
+        </div>
+
         <div class="export-row">
-          <span class="export-lbl">Resolution</span>
+          <span class="export-lbl">Renders</span>
           <span id="exportResInfo" class="export-val">1920 × 1080 (16:9 Landscape)</span>
         </div>
 
@@ -901,6 +916,7 @@
   <script src="js/presetParser.js"></script>
   <script src="js/subtitleManager.js"></script>
   <script src="js/projectManager.js"></script>
+  <script src="js/safeAreas.js"></script>
   <script src="js/videoPlayer.js"></script>
   <script src="js/exporter.js"></script>
   <script src="js/captionSegmenter.js"></script>

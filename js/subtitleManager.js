@@ -290,7 +290,17 @@ ${clipNodes}
   }
 
   // --- SRT & WebVTT Import/Export ---
+  /**
+   * Parses and commits in one step. Kept for callers that want exactly that;
+   * anything routing the captions somewhere else — such as into every aspect
+   * ratio of a film at once — should use parseSubtitleText and place them.
+   */
   parseSRT(srtText) {
+    this.setSubtitles(this.parseSubtitleText(srtText));
+  }
+
+  /** Parses SRT or WebVTT and returns the cues without touching the store. */
+  parseSubtitleText(srtText) {
     // Strip a UTF-8 BOM and any WEBVTT header/NOTE blocks so the same parser
     // handles .srt and .vtt.
     const cleaned = String(srtText || '')
@@ -338,7 +348,7 @@ ${clipNodes}
       });
     }
 
-    this.setSubtitles(subs);
+    return subs;
   }
 
   exportSRT() {
