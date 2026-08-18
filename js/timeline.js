@@ -298,6 +298,21 @@ class TimelineController {
     return this.peaks[idx];
   }
 
+  /**
+   * Swap in a waveform that was decoded earlier. Films keep their own peaks for
+   * the session, so switching tabs redraws the right waveform instantly instead
+   * of decoding the audio again.
+   */
+  setWaveform(peaks, durationSec) {
+    this.peaks = peaks || null;
+    this.peaksDuration = durationSec || 0;
+    this.drawWaveform();
+  }
+
+  getWaveform() {
+    return { peaks: this.peaks || null, duration: this.peaksDuration || 0 };
+  }
+
   /** Decode the loaded media's audio and build a real peaks array. */
   async loadAudioWaveform(file) {
     this.peaks = null;

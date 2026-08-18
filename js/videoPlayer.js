@@ -36,6 +36,7 @@ class VideoPlayerController {
     this.project = { ...ASPECT_PRESETS['16x9'] };
     this.onTimeUpdateCallbacks = [];
     this.onProjectChangeCallbacks = [];
+    this.onPresetChangeCallbacks = [];
 
     this.hasMedia = false; // false => the built-in demo clock drives the timeline
     this.isPlaying = false;
@@ -166,6 +167,16 @@ class VideoPlayerController {
     if (!presetObj) return;
     this.activePreset = { ...this.activePreset, ...presetObj };
     this.renderOverlay();
+    this.onPresetChangeCallbacks.forEach(cb => cb(this.activePreset));
+  }
+
+  /**
+   * Fires for every route a style can change by — the inspector, the preset
+   * dropdown, an imported .prfpset — so the film that owns the style has one
+   * place to hear about it rather than four.
+   */
+  onPresetChange(cb) {
+    this.onPresetChangeCallbacks.push(cb);
   }
 
   setSpeed(rate) {
@@ -183,6 +194,23 @@ class VideoPlayerController {
     this.video.load();
     this.syntheticTime = 0;
     this.renderOverlay();
+  }
+
+  /**
+   * Detaches the current media and hands the timeline back to the built-in demo
+   * clock. Switching to a film whose media has not been relinked goes through
+   * here, so the program monitor shows the placeholder rather than the previous
+   * film's picture — which would silently misrepresent what is being captioned.
+   */
+  unloadMedia() {
+    this.pause();
+    this.hasMedia = false;
+    this.video.removeAttribute('src');
+    this.video.srcObject = null;
+    try { this.video.load(); } catch (e) { /* nothing was loaded */ }
+    this.syntheticTime = 0;
+    this.renderOverlay();
+    this.emitTimeUpdate();
   }
 
   onFrameRender(cb) {

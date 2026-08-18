@@ -37,6 +37,10 @@
       <symbol id="i-loop" viewBox="0 0 24 24"><path d="M17 2.5l3.5 3.5L17 9.5"/><path d="M3.5 11.5V9A3 3 0 0 1 6.5 6h14"/><path d="M7 14.5L3.5 18 7 21.5"/><path d="M20.5 12.5V15a3 3 0 0 1-3 3h-14"/></symbol>
       <symbol id="i-film" viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="15" rx="2"/><path d="M7.5 4.5v15M16.5 4.5v15M2.5 12h19"/></symbol>
       <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l8.5 4.5L12 12 3.5 7.5 12 3z"/><path d="M3.5 12.5L12 17l8.5-4.5"/></symbol>
+      <symbol id="i-project" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M15 5.5A2.5 2.5 0 0 0 12.5 3h-7A2.5 2.5 0 0 0 3 5.5v7A2.5 2.5 0 0 0 5.5 15"/></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.5 13.5a4 4 0 0 0 5.7 0l2.8-2.8a4 4 0 0 0-5.7-5.7l-1.3 1.3"/><path d="M13.5 10.5a4 4 0 0 0-5.7 0L5 13.3a4 4 0 1 0 5.7 5.7l1.3-1.3"/></symbol>
+      <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 3h11l3 3v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M8 3v6h7V3M8 21v-6h8v6"/></symbol>
     </defs>
   </svg>
 
@@ -53,6 +57,54 @@
 
     <div class="header-controls">
       <div class="menu-group">
+        <div class="menu" data-menu>
+          <button class="btn btn-quiet menu-trigger" data-menu-trigger aria-haspopup="true" aria-expanded="false">
+            <svg class="icon"><use href="#i-project"/></svg>
+            Project
+            <svg class="icon icon-sm menu-caret"><use href="#i-chevron"/></svg>
+          </button>
+          <div class="menu-panel" data-menu-panel role="menu">
+            <button id="btnNewProject" class="menu-item" role="menuitem">
+              <svg class="icon"><use href="#i-plus"/></svg>
+              <span class="menu-item-label">New Project<em>Start a fresh job with one empty film</em></span>
+            </button>
+            <button id="btnOpenProject" class="menu-item" role="menuitem">
+              <svg class="icon"><use href="#i-import"/></svg>
+              <span class="menu-item-label">Open Project…<em>.ttproj</em></span>
+              <kbd>⌘O</kbd>
+            </button>
+            <button id="btnSaveProject" class="menu-item menu-item-feature" role="menuitem">
+              <svg class="icon"><use href="#i-save"/></svg>
+              <span class="menu-item-label">Save Project<em>Every film in this job, in one file</em></span>
+              <kbd>⌘S</kbd>
+            </button>
+            <button id="btnSaveProjectAs" class="menu-item" role="menuitem">
+              <span class="menu-item-label">Save Project As…<em>Write a new .ttproj</em></span>
+              <kbd>⇧⌘S</kbd>
+            </button>
+            <div class="menu-sep"></div>
+            <button id="btnAddFilmMenu" class="menu-item" role="menuitem">
+              <svg class="icon"><use href="#i-film"/></svg>
+              <span class="menu-item-label">Add Film<em>Another edit in this job</em></span>
+            </button>
+            <button id="btnDuplicateFilm" class="menu-item" role="menuitem">
+              <svg class="icon"><use href="#i-copy"/></svg>
+              <span class="menu-item-label">Duplicate Film<em>Copy captions and style into a new edit</em></span>
+            </button>
+            <button id="btnRenameFilm" class="menu-item" role="menuitem">
+              <span class="menu-item-label">Rename Film…<em>Or double-click its tab</em></span>
+            </button>
+            <button id="btnDeleteFilm" class="menu-item" role="menuitem">
+              <span class="menu-item-label">Delete Film<em>Removes its captions too</em></span>
+            </button>
+            <div class="menu-sep"></div>
+            <button id="btnRelinkMediaMenu" class="menu-item" role="menuitem">
+              <svg class="icon"><use href="#i-link"/></svg>
+              <span class="menu-item-label">Relink Media…<em>Point reopened films back at their files</em></span>
+            </button>
+          </div>
+        </div>
+
         <div class="menu" data-menu>
           <button class="btn btn-quiet menu-trigger" data-menu-trigger aria-haspopup="true" aria-expanded="false">
             <svg class="icon"><use href="#i-import"/></svg>
@@ -83,6 +135,8 @@
         <input type="file" id="mediaFileInput" accept="video/*,audio/*" hidden>
         <input type="file" id="subFileInput" accept=".srt,.vtt,.json" hidden>
         <input type="file" id="presetFileInput" accept=".prfpset,.prtextstyle,.xml,.json" hidden>
+        <input type="file" id="projectFileInput" accept=".ttproj,.json" hidden>
+        <input type="file" id="relinkFilesInput" accept="video/*,audio/*" multiple hidden>
       </div>
 
       <div class="timecode-display-box" title="Playhead timecode (25 fps)">
@@ -128,6 +182,28 @@
       </div>
     </div>
   </header>
+
+  <!-- Film tab strip. One project (job) holds many films (edits); each film
+       carries its own media, captions, style and aspect ratio. -->
+  <div class="film-bar">
+    <div class="film-tabs" id="filmTabs" role="tablist" aria-label="Films in this project"></div>
+    <button id="btnAddFilm" class="film-add" title="Add a film to this project">
+      <svg class="icon"><use href="#i-plus"/></svg>
+    </button>
+
+    <div class="film-bar-spacer"></div>
+
+    <button id="btnRelinkBanner" class="film-relink hidden" title="Choose the media files for the films that lost them">
+      <svg class="icon icon-sm"><use href="#i-link"/></svg>
+      <span id="relinkLabel">0 films need media</span>
+    </button>
+
+    <button id="projectChip" class="project-chip" title="Project name — click to rename">
+      <svg class="icon icon-sm"><use href="#i-project"/></svg>
+      <span id="projectNameLabel">Untitled Project</span>
+      <span id="projectDirtyDot" class="dirty-dot hidden" title="Unsaved changes"></span>
+    </button>
+  </div>
 
   <!-- Main Workspace Grid -->
   <main class="workspace-grid">
@@ -533,6 +609,10 @@
         <div class="shortcut-row"><kbd>,</kbd> <span>Settings — Manage Transcription Models</span></div>
         <div class="shortcut-row"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <span>Aspect Ratio: 16:9 / 1:1 / 4:5 / 9:16</span></div>
         <div class="shortcut-row"><kbd>+</kbd> / <kbd>-</kbd> <span>Zoom Timeline In / Out</span></div>
+        <div class="shortcut-row"><kbd>[</kbd> / <kbd>]</kbd> <span>Previous / Next Film in this Project</span></div>
+        <div class="shortcut-row"><kbd>Ctrl/⌘ + S</kbd> <span>Save Project</span></div>
+        <div class="shortcut-row"><kbd>Ctrl/⌘ + Shift + S</kbd> <span>Save Project As…</span></div>
+        <div class="shortcut-row"><kbd>Ctrl/⌘ + O</kbd> <span>Open Project</span></div>
       </div>
     </div>
   </div>
@@ -820,6 +900,7 @@
   <script src="js/menu.js"></script>
   <script src="js/presetParser.js"></script>
   <script src="js/subtitleManager.js"></script>
+  <script src="js/projectManager.js"></script>
   <script src="js/videoPlayer.js"></script>
   <script src="js/exporter.js"></script>
   <script src="js/captionSegmenter.js"></script>
