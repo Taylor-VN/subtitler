@@ -230,6 +230,7 @@ only and leaves the GPU idle. The MLX runtimes use the Apple GPU:
 | Qwen3-ASR MLX | 90 MB | Strongest multilingual, Apple GPU |
 | Transformers + PyTorch | 2.5 GB | Cohere Transcribe, Granite Speech |
 | faster-whisper | 150 MB | NVIDIA GPUs, generic CPU |
+| SpeechBrain | 2.3 GB | Speaker separation (shares torch with the aligner) |
 
 Install these from **Settings → Speech Runtimes**. "Install recommended setup"
 picks the right set for the machine it is running on — the GPU runtimes plus the
@@ -265,18 +266,73 @@ timings too. Install it from **Settings → Word Timing Aligner** (it needs PyTo
 Settings installs for you). The Transcribe dialog then lets you choose
 *automatic* (align when the model needs it), *always*, or *never*.
 
+### Speaker separation
+
+Tick **Separate speakers** in the Transcribe dialog and each word is labelled
+with the person who said it, so **no caption ever holds two voices** — a caption
+break is forced at every change of speaker, however short the exchange, and each
+line carries its speaker's name.
+
+It works by voice rather than by content: each run of words between pauses is
+encoded to an ECAPA-TDNN embedding — a vector describing the voice, not the
+words — and those are clustered, so the same person is recognised across the
+whole timeline. Leave the count on *work it out from the audio*, or set it when
+you know it; a known count is the more reliable of the two. Boundaries land on
+real gaps between words because the spans are cut from the word timings, which
+is why this pairs with the aligner.
+
+Sentence ends are cut as well as pauses, because dialogue is regularly handed
+over with no silence at all — *"...wrong room." "In here,"* is two people inside
+a fifth of a second, and without that cut they share one label and one caption.
+The reverse is guarded too: a change of speaker is only kept where a speaker
+could plausibly have changed, so the clustering drifting part-way through
+somebody's sentence cannot break the line in two.
+
+Labels start as "Speaker 1", "Speaker 2" in order of first appearance. Renaming
+one in the captions list renames that person on **every** line at once. Tick
+**Speaker names** in the Export menu to carry them into SubRip (`Name: text`)
+and WebVTT (`<v Name>` voice spans).
+
+Install it from **Settings → Speaker Separation** plus the SpeechBrain runtime.
+Overlapping speech is the known limit: when two people talk over each other, one
+of them wins the span. pyannote's diarisation pipelines handle that better and
+are not used here — their weights need a licence acceptance and an access token,
+which does not fit an app whose every other model installs on a button click.
+
 ### Segmentation
 
 Whisper-style output is long transcript runs, not subtitles. Word timings are
 re-cut into broadcast-style captions: a character budget per line, a line budget
 per caption, max/min on-screen duration, breaks preferred at sentence then
-clause punctuation, a forced break on a pause, a reading-speed ceiling, and
-widow prevention so no caption is left as one stranded word. The sliders re-cut
-the **stored** transcription instantly — changing them does not re-run the model.
+clause punctuation, a forced break on a pause or a change of speaker, a
+reading-speed ceiling, and widow prevention so no caption is left as one
+stranded word — never by moving words across a speaker change. The sliders
+re-cut the **stored** transcription instantly — changing them does not re-run
+the model.
 
 Audio is decoded, downmixed and resampled to 16 kHz mono in the browser before
 reaching the model, which is exactly what these models expect — so transcription
 needs no ffmpeg.
+
+**Skip silent passages (VAD)** then discards words the level detector places in
+silence, which is how hallucinated lines over music and room tone are removed.
+The floor it measures against is taken per five-second block as well as over the
+whole file, and the block always wins where it is the more generous of the two.
+One figure for a whole programme does not survive a cut: in a piece that is
+mostly loud, the quietest fifth of it — what the file-wide floor is built from —
+can sit above the level of the dialogue in a quiet scene, and every word there
+would then read as silence and be thrown away. The count of words removed this
+way is reported when the transcription finishes; untick the box to keep them.
+
+**Keep uncertain passages (crosstalk)** stands down a second, invisible dropper.
+Whisper carries a no-speech probability per thirty-second window and discards
+the whole window where that is high and the decode came out weak — no words, no
+timings, just a hole in the transcript. Two people talking over each other reads
+exactly like that from inside the decoder, and so does a hard cut into a new
+scene. Ticking this keeps those passages and restores the temperature retries
+the same check calls off, at the cost of the occasional invented line over music
+— which the silence pass above still catches. Whisper models only: the other
+engines transcribe what they are given and have no such gate to stand down.
 
 ## Exports
 
@@ -284,7 +340,7 @@ needs no ffmpeg.
 | --- | --- |
 | ProRes 4444 / 4444 XQ | QuickTime `.mov`, `yuva444p10le`, 16-bit alpha |
 | PNG sequence | Fallback when ffmpeg is absent; transparent RGBA frames + the ffmpeg command |
-| SRT / VTT | Standard subtitle interchange |
+| SRT / VTT | Standard subtitle interchange; optionally with speaker names |
 | Premiere sequence XML | FCP7 `xmeml` v4 |
 | Style preset | `.prfpset`, round-trips back through the importer |
 | Project | `.ttproj` — every film in the job, media excluded |
@@ -347,6 +403,7 @@ js/settings.js            model + runtime manager UI (install/remove, warnings)
 js/captionSegmenter.js    word timings -> broadcast-style captions
 model_registry.py         model + runtime metadata, install-state detection
 engines.py                MLX/transformers/CTranslate2 adapters + forced aligner
+diarize.py                speaker embeddings + clustering — who said each word
 js/subtitleManager.js     caption store, timecodes, SRT/VTT/XML
 js/projectManager.js      project/film/ratio records, .ttproj serialisation
 js/safeAreas.js           broadcast and social safe-area guide sets

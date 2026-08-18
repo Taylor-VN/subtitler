@@ -14,6 +14,7 @@ class SettingsController {
     this.probe = null;
     this.models = [];
     this.aligner = null;
+    this.diarizer = null;
     this.runtimes = [];
     this.filter = 'all';
     this.pollTimers = new Map();
@@ -66,6 +67,7 @@ class SettingsController {
         'The desktop backend is not running, so models cannot be managed from here.';
       document.getElementById('modelList').innerHTML = '';
       document.getElementById('alignerRow').innerHTML = '';
+      document.getElementById('diarizerRow').innerHTML = '';
       note.className = 'export-note warn';
       note.textContent =
         `Launch Taylor's Transcriber with run_subtitler.sh (or "python3 app.py") to install and run models.`;
@@ -79,10 +81,12 @@ class SettingsController {
       this.probe = await window.pywebview.api.transcribe_probe();
       this.models = this.probe.models || [];
       this.aligner = this.probe.aligner || null;
+      this.diarizer = this.probe.diarizer || null;
       this.runtimes = this.probe.runtimes || [];
       this.renderSystemInfo();
       this.renderRuntimes();
       this.renderAligner();
+      this.renderDiarizer();
       this.renderModels();
       this.renderDisk();
     } catch (e) {
@@ -252,6 +256,29 @@ class SettingsController {
       badges: [{ cls: 'timing', text: 'word timing' }]
     });
     this.wireRow(row, this.aligner.id);
+  }
+
+  /**
+   * The speaker model is small, but useless without SpeechBrain — so the row
+   * says so rather than offering a download that cannot run.
+   */
+  renderDiarizer() {
+    const row = document.getElementById('diarizerRow');
+    if (!row) return;
+    if (!this.diarizer) { row.innerHTML = ''; return; }
+    row.className = `model-row${this.diarizer.installed ? ' installed' : ''}`
+      + (this.diarizer.available ? '' : ' unavailable');
+    row.innerHTML = this.modelRowHtml({
+      id: this.diarizer.id,
+      label: this.diarizer.label,
+      notes: this.diarizer.notes,
+      size_gb: this.diarizer.size_gb,
+      installed: this.diarizer.installed,
+      engine_available: this.diarizer.available !== false,
+      engine_package: 'speechbrain',
+      badges: [{ cls: 'timing', text: 'speaker labels' }]
+    });
+    this.wireRow(row, this.diarizer.id);
   }
 
   renderModels() {

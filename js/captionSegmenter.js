@@ -11,6 +11,9 @@
  *   - breaks preferred at sentence punctuation, then clause punctuation, then
  *     a plain word boundary
  *   - a forced break when the speaker pauses
+ *   - a forced break when the speaker *changes*, so one caption is always one
+ *     person — two voices on a line leave the reader with no way to tell where
+ *     one stops
  *   - a reading-speed ceiling, so dense captions are held longer
  *
  * It is a pure function of (words, settings), so the settings can be changed
@@ -23,6 +26,7 @@ const DEFAULT_SEGMENT_SETTINGS = {
   maxDurationSec: 6.0,
   minDurationSec: 1.0,
   gapBreakSec: 0.8,      // a pause at least this long forces a new caption
+  splitOnSpeaker: true,  // never carry two speakers in one caption
   maxCharsPerSec: 20,    // reading-speed ceiling
   framesGapBetweenCaptions: 1,
   fps: 25
@@ -65,6 +69,12 @@ class CaptionSegmenter {
 
       // A long pause always ends the caption, however short it is.
       if (prev && (w.start - prev.end) >= s.gapBreakSec) {
+        flush();
+      }
+
+      // So does a change of speaker, at any length: a caption holding two
+      // voices cannot be read, and cannot be labelled with either of them.
+      if (prev && s.splitOnSpeaker && w.speaker !== prev.speaker) {
         flush();
       }
 
@@ -120,9 +130,11 @@ class CaptionSegmenter {
       if (!prev.words || !curr.words) continue;
       if (this.joinWords(curr.words).length >= minChars) continue;
 
-      // Only rebalance across a continuous run of speech.
+      // Only rebalance across a continuous run of one person's speech. Moving a
+      // word across a speaker change would put it in someone else's mouth.
       const gap = curr.words[0].start - prev.words[prev.words.length - 1].end;
       if (gap >= s.gapBreakSec) continue;
+      if (s.splitOnSpeaker && prev.speaker !== curr.speaker) continue;
 
       const merged = [...prev.words, ...curr.words];
       const mergedDur = merged[merged.length - 1].end - merged[0].start;
@@ -165,7 +177,13 @@ class CaptionSegmenter {
       if (!isFinite(end) || end <= start) end = start + 0.08;
       if (start < lastEnd) start = lastEnd;
       if (end <= start) end = start + 0.08;
-      out.push({ text, start, end, confidence, corrected: !!w.corrected });
+      out.push({
+        text, start, end, confidence,
+        corrected: !!w.corrected,
+        // Undefined rather than '' when unlabelled, so a diarised run and a
+        // plain one never compare unequal on this field.
+        speaker: w.speaker || undefined
+      });
       lastEnd = end;
     });
     return out;
@@ -194,6 +212,9 @@ class CaptionSegmenter {
       start: words[0].start,
       end: words[words.length - 1].end,
       text: this.wrapLines(this.joinWords(words)),
+      // Every word in a caption is one person's by construction, so the first
+      // word's label is the caption's.
+      speaker: words[0].speaker || '',
       words: words
     };
   }
@@ -320,6 +341,7 @@ class CaptionSegmenter {
       start: Math.max(0, c.start),
       end: Math.max(c.start + frame, c.end),
       text: c.text,
+      speaker: c.speaker || '',
       // Retained so callers can report per-word confidence for this caption.
       words: c.words
     }));
@@ -330,7 +352,8 @@ class CaptionSegmenter {
     const words = [];
     (segments || []).forEach(seg => {
       if (Array.isArray(seg.words) && seg.words.length) {
-        seg.words.forEach(w => words.push(w));
+        seg.words.forEach(w => words.push(
+          seg.speaker && !w.speaker ? { ...w, speaker: seg.speaker } : w));
         return;
       }
       // Distribute the segment's duration evenly across its words.
@@ -341,7 +364,8 @@ class CaptionSegmenter {
       parts.forEach((p, i) => words.push({
         word: p,
         start: seg.start + i * per,
-        end: seg.start + (i + 1) * per
+        end: seg.start + (i + 1) * per,
+        speaker: seg.speaker || undefined
       }));
     });
     return this.segment(words);

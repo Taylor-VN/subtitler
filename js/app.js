@@ -17,6 +17,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   // cluster high, so the bar sits well above a coin flip.
   const LOW_CONFIDENCE = 0.62;
 
+  // Engine ids from model_registry.py. These are the ones that decide for
+  // themselves whether a passage holds speech, and so the only ones with that
+  // decision to hand back — see "Keep uncertain passages".
+  const WHISPER_ENGINES = ['mlx-whisper', 'faster-whisper'];
+
   // Initialize Core Modules (25 FPS Default)
   const presetParser = new PresetParser();
   const subManager = new SubtitleManager(FPS);
@@ -245,14 +250,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     // Exports
+    const withSpeakers = () =>
+      ({ speakers: document.getElementById('exportSpeakerNames').checked });
+
     document.getElementById('btnExportSrt').addEventListener('click', () => {
       if (!requireCaptions()) return;
-      saveTextFile(subManager.exportSRT(), exportName('.srt'), 'text/plain');
+      saveTextFile(subManager.exportSRT(withSpeakers()), exportName('.srt'), 'text/plain');
     });
 
     document.getElementById('btnExportVtt').addEventListener('click', () => {
       if (!requireCaptions()) return;
-      saveTextFile(subManager.exportVTT(), exportName('.vtt'), 'text/vtt');
+      saveTextFile(subManager.exportVTT(withSpeakers()), exportName('.vtt'), 'text/vtt');
     });
 
     document.getElementById('btnExportXml').addEventListener('click', () => {
@@ -662,6 +670,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       if (reviewOnly) filtered = filtered.filter(s => s.uncertain && s.uncertain.length);
 
+      // The speaker field only earns its space once something has labelled the
+      // captions — but the selected line always offers one, so a track can be
+      // labelled by hand without transcribing it first.
+      const anySpeakers = subs.some(s => s.speaker);
+
       countBadge.textContent = `${filtered.length} line${filtered.length === 1 ? '' : 's'}`;
       updateReviewButton(subs);
 
@@ -690,6 +703,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             ${uncertain ? `<span class="caption-confidence" title="Unsure about: ${escapeHtml(uncertain.join(', '))}">?${uncertain.length}</span>` : ''}
             <button class="caption-delete-btn" title="Delete Line">✕</button>
           </div>
+          ${(anySpeakers || sub.id === selectedId) ? `<input type="text" class="caption-speaker" value="${escapeHtml(sub.speaker || '')}"
+             placeholder="Speaker" title="Who says this line. Renaming updates every line by this person.">` : ''}
           <textarea class="caption-textarea" placeholder="Caption text...">${escapeHtml(sub.text)}</textarea>
         `;
 
@@ -725,6 +740,31 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (isRestoringFocus) return; // programmatic re-focus, not a user action
           subManager.selectSubtitle(sub.id);
         });
+
+        // Speaker — renaming one line renames the person everywhere, since
+        // "Speaker 2" is a placeholder for someone with a real name, and fixing
+        // it eighty times by hand is not an edit anyone would choose to make.
+        const speakerInput = itemEl.querySelector('.caption-speaker');
+        if (speakerInput) {
+          speakerInput.addEventListener('change', () => {
+            const name = speakerInput.value.trim();
+            const previous = sub.speaker || '';
+            if (name === previous) return;
+
+            const affected = previous
+              ? subManager.getSubtitles().filter(s => s.speaker === previous)
+              : [sub];
+            affected.forEach(s => subManager.updateSubtitle(s.id, { speaker: name }, { silent: true }));
+            renderCaptionsList(subManager.getSubtitles(), subManager.selectedId);
+            project.markDirty();
+            scheduleAutosave();
+
+            if (affected.length > 1) {
+              toast(`Renamed ${affected.length} lines from "${previous}" to "${name || 'no speaker'}".`,
+                'success');
+            }
+          });
+        }
 
         // Delete
         itemEl.querySelector('.caption-delete-btn').addEventListener('click', (e) => {
@@ -1275,7 +1315,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (opts.replace === false) {
       // Appending is an edit to the ratio in hand, not a fresh transcript, so
       // it stays where it was made.
-      const existing = subManager.getSubtitles().map(s => ({ start: s.start, end: s.end, text: s.text }));
+      const existing = subManager.getSubtitles()
+        .map(s => ({ start: s.start, end: s.end, text: s.text, speaker: s.speaker }));
       subManager.setSubtitles([...existing, ...captions]);
       timelineController.resizeAndDraw();
     } else {
@@ -1332,6 +1373,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       audioFileName.textContent = stemFile ? stemFile.name : 'No file chosen';
       e.target.value = '';
     });
+
+    const diarizeToggle = document.getElementById('transcribeDiarize');
+    const speakerCount = document.getElementById('transcribeSpeakerCount');
+    const diarizeNote = document.getElementById('transcribeDiarizeNote');
+
+    // The count only means anything once separation is on.
+    diarizeToggle.addEventListener('change', () => {
+      speakerCount.disabled = !diarizeToggle.checked;
+    });
+    speakerCount.disabled = true;
 
     const segChars = document.getElementById('segMaxChars');
     const segLines = document.getElementById('segMaxLines');
@@ -1396,6 +1447,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         modelNote.classList.add('hidden');
       }
 
+      // Only Whisper discards a passage it doubts, so only Whisper has a gate to
+      // stand down. Offered against a model that has none, the control would do
+      // nothing at all and look as though it had. A custom repo is assumed
+      // Whisper-shaped, which is the same assumption the backend makes.
+      const keepUncertain = document.getElementById('transcribeKeepUncertain');
+      const gated = modelSelect.value === '__custom__'
+        || !!(model && WHISPER_ENGINES.includes(model.engine));
+      keepUncertain.disabled = !gated;
+      if (!gated) keepUncertain.checked = false;
+      keepUncertain.closest('.checkbox-label').classList.toggle('disabled', !gated);
+
       // "Model's own timings only" is meaningless when the model has none.
       const neverOpt = Array.from(alignSelect.options).find(o => o.value === 'never');
       if (neverOpt) {
@@ -1406,8 +1468,37 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     applyModelRules = applyModelLanguageRules;
 
+    /**
+     * Speaker separation needs two things that install separately — the
+     * SpeechBrain runtime and the voice model — so the control is switched off
+     * and says which one is missing, rather than being offered and then quietly
+     * returning unlabelled captions.
+     */
+    function updateDiarizeNote(probe) {
+      const d = probe && probe.diarizer;
+      const ready = !!(d && d.available && d.installed);
+
+      diarizeToggle.disabled = !ready;
+      if (!ready) diarizeToggle.checked = false;
+      speakerCount.disabled = !diarizeToggle.checked;
+
+      if (ready) {
+        diarizeNote.classList.add('hidden');
+        return;
+      }
+      diarizeNote.textContent = !d
+        ? 'Speaker separation is unavailable on this backend.'
+        : (!d.available
+            ? 'Install the SpeechBrain runtime in Settings → Speech Runtimes to separate speakers.'
+            : 'Install the speaker model in Settings → Speaker Separation to separate speakers.');
+      diarizeNote.classList.remove('hidden');
+    }
+
     async function updateBackendNote() {
       const probe = await transcriber.probe();
+      // Before the early returns below: the speaker controls need settling
+      // whatever else is missing.
+      updateDiarizeNote(probe);
 
       if (!transcriber.hasBackend()) {
         note.className = 'export-note warn';
@@ -1494,11 +1585,14 @@ document.addEventListener('DOMContentLoaded', async () => {
           language: document.getElementById('transcribeLanguage').value,
           task: document.getElementById('transcribeTask').value,
           vad: document.getElementById('transcribeVad').checked,
+          keepUncertain: document.getElementById('transcribeKeepUncertain').checked,
           audioFile: audioSource.value === 'file' ? stemFile : null,
           channel: document.getElementById('transcribeChannel').value,
           normalise: document.getElementById('transcribeNormalise').checked,
           suppressMusic: document.getElementById('transcribeSuppressMusic').checked,
           carryContext: document.getElementById('transcribeCarryContext').checked,
+          diarize: diarizeToggle.checked,
+          speakers: document.getElementById('transcribeSpeakerCount').value,
           vocabulary: vocabulary.value,
           align: ({ auto: 'auto', always: true, never: false })[
             document.getElementById('transcribeAlign').value],
@@ -1526,6 +1620,14 @@ document.addEventListener('DOMContentLoaded', async () => {
           const conf = result.confidence || {};
           if (conf.reported && conf.low_count) {
             detail.push(`${conf.low_count} uncertain word(s) — use Review in the captions list`);
+          }
+          if (result.speaker_count) {
+            detail.push(`${result.speaker_count} speaker${result.speaker_count === 1 ? '' : 's'} separated`);
+          } else if (diarizeToggle.checked) {
+            // The backend explains exactly what was missing; repeating it beats
+            // silently handing back unlabelled captions.
+            const why = (result.notes || []).find(n => n.indexOf('Speaker separation') === 0);
+            detail.push(why || 'speaker separation did not run');
           }
           toast(`Transcribed into ${count} captions${lang}.`
             + (detail.length ? `\n${detail.join('; ')}.` : ''), 'success', 10000);

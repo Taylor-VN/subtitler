@@ -351,19 +351,34 @@ ${clipNodes}
     return subs;
   }
 
-  exportSRT() {
+  /**
+   * @param opts.speakers  carry speaker names into the cue text
+   *
+   * SubRip has no field for a speaker, so the name goes in front of the text —
+   * the convention every caption house uses, and the one Premiere reads back as
+   * plain text rather than dropping.
+   */
+  exportSRT(opts = {}) {
     return this.subtitles.map((sub, i) => {
       const startSrt = this.secondsToSrtTimecode(sub.start);
       const endSrt = this.secondsToSrtTimecode(sub.end);
-      return `${i + 1}\n${startSrt} --> ${endSrt}\n${sub.text}\n`;
+      const text = opts.speakers && sub.speaker ? `${sub.speaker}: ${sub.text}` : sub.text;
+      return `${i + 1}\n${startSrt} --> ${endSrt}\n${text}\n`;
     }).join('\n');
   }
 
-  exportVTT() {
+  /**
+   * WebVTT does have a speaker field — the voice span — so it is used rather
+   * than a prefix. Players that ignore it still show the text.
+   */
+  exportVTT(opts = {}) {
     const body = this.subtitles.map((sub, i) => {
       const startVtt = this.secondsToSrtTimecode(sub.start).replace(',', '.');
       const endVtt = this.secondsToSrtTimecode(sub.end).replace(',', '.');
-      return `${i + 1}\n${startVtt} --> ${endVtt}\n${sub.text}\n`;
+      const text = opts.speakers && sub.speaker
+        ? `<v ${sub.speaker.replace(/[<>]/g, '')}>${sub.text}</v>`
+        : sub.text;
+      return `${i + 1}\n${startVtt} --> ${endVtt}\n${text}\n`;
     }).join('\n');
     return `WEBVTT\n\n${body}`;
   }

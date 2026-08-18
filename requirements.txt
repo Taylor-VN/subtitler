@@ -33,11 +33,20 @@ huggingface-hub>=0.23.0
 # NVIDIA GPU or generic CPU:
 #   faster-whisper>=1.0.0     No Metal backend, so CPU-only on a Mac
 #
-# Any Hugging Face checkpoint (Cohere Transcribe, Granite Speech):
+# Any Hugging Face checkpoint (Cohere Transcribe):
 #   transformers>=4.40.0
 #   torch>=2.2.0
 #
+# Granite Speech (its processor classes need a newer transformers release):
+#   transformers>=4.52.1
+#   torch>=2.2.0
+#
 # Word-timing forced aligner (recommended for captions):
+#   torch>=2.2.0
+#   torchaudio>=2.2.0
+#
+# Speaker separation (who is talking, so no caption holds two people):
+#   speechbrain>=1.0.0
 #   torch>=2.2.0
 #   torchaudio>=2.2.0
 

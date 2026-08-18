@@ -158,6 +158,10 @@
               <kbd>E</kbd>
             </button>
             <div class="menu-sep"></div>
+            <label class="menu-item menu-item-toggle" data-menu-keep-open>
+              <input type="checkbox" id="exportSpeakerNames">
+              <span class="menu-item-label">Speaker names<em>Carry them into SubRip and WebVTT</em></span>
+            </label>
             <button id="btnExportSrt" class="menu-item" role="menuitem">
               <span class="menu-item-label">SubRip<em>subtitles.srt</em></span>
             </button>
@@ -729,6 +733,18 @@
 
         <div class="settings-section">
           <div class="settings-section-head">
+            <label class="group-label">Speaker Separation</label>
+          </div>
+          <p class="modal-hint tight">
+            Recognises each voice across the whole timeline, so captions break
+            at every change of speaker and carry a name. Needs the word-timing
+            aligner, since speakers are matched to words.
+          </p>
+          <div id="diarizerRow" class="model-row"></div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-head">
             <label class="group-label">Speech Models</label>
             <div class="model-filter-btns">
               <button class="model-filter active" data-tier="all">All</button>
@@ -856,6 +872,42 @@
           <label class="checkbox-label">
             <input type="checkbox" id="transcribeVad" checked> Skip silent passages (VAD)
           </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="transcribeKeepUncertain"> Keep uncertain passages (crosstalk)
+          </label>
+          <p class="modal-hint tight">
+            Whisper throws away a whole passage when it doubts there is speech in
+            it — which is what people talking over each other, and a hard cut into
+            the next scene, both look like from inside the decoder. Tick this to
+            keep those passages and let it work at them instead. Costs the odd
+            invented line over music, which the silence pass above still catches.
+            Whisper models only.
+          </p>
+        </div>
+
+        <div class="style-group compact-group">
+          <label class="group-label">Speakers</label>
+          <p class="modal-hint tight">
+            Works out who is talking and breaks a caption at every change of
+            voice, so no line ever holds two people. Each caption is labelled,
+            and the names are yours to edit in the captions list.
+          </p>
+          <label class="checkbox-label">
+            <input type="checkbox" id="transcribeDiarize"> Separate speakers
+          </label>
+          <div class="export-row">
+            <label class="export-lbl" for="transcribeSpeakerCount">How many</label>
+            <select id="transcribeSpeakerCount" class="input-select">
+              <option value="auto" selected>Work it out from the audio</option>
+              <option value="1">1 — single voice</option>
+              <option value="2">2 people</option>
+              <option value="3">3 people</option>
+              <option value="4">4 people</option>
+              <option value="5">5 people</option>
+              <option value="6">6 people</option>
+            </select>
+          </div>
+          <div id="transcribeDiarizeNote" class="model-note hidden"></div>
         </div>
 
         <div class="style-group compact-group">

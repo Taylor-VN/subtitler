@@ -32,6 +32,7 @@ ENGINE_MLX_WHISPER = 'mlx-whisper'
 ENGINE_MLX_PARAKEET = 'parakeet-mlx'
 ENGINE_MLX_QWEN3 = 'mlx-qwen3-asr'
 ENGINE_TRANSFORMERS = 'transformers'
+ENGINE_GRANITE_SPEECH = 'granite-speech'
 ENGINE_FASTER_WHISPER = 'faster-whisper'
 
 ENGINE_LABELS = {
@@ -39,6 +40,7 @@ ENGINE_LABELS = {
     ENGINE_MLX_PARAKEET: 'MLX (Apple GPU)',
     ENGINE_MLX_QWEN3: 'MLX (Apple GPU)',
     ENGINE_TRANSFORMERS: 'Transformers (MPS/CUDA/CPU)',
+    ENGINE_GRANITE_SPEECH: 'Transformers (MPS/CUDA/CPU)',
     ENGINE_FASTER_WHISPER: 'faster-whisper (CPU on Mac)',
 }
 
@@ -47,6 +49,7 @@ ENGINE_PACKAGES = {
     ENGINE_MLX_PARAKEET: 'parakeet-mlx',
     ENGINE_MLX_QWEN3: 'mlx-qwen3-asr',
     ENGINE_TRANSFORMERS: 'transformers',
+    ENGINE_GRANITE_SPEECH: 'transformers',
     ENGINE_FASTER_WHISPER: 'faster-whisper',
 }
 
@@ -107,7 +110,7 @@ MODELS = {
         id='granite-speech-4.1-2b',
         repo='ibm-granite/granite-speech-4.1-2b',
         label='IBM Granite Speech 4.1 2B',
-        engine=ENGINE_TRANSFORMERS,
+        engine=ENGINE_GRANITE_SPEECH,
         size_gb=4.4,
         languages='multilingual',
         wer=5.33,
@@ -202,13 +205,31 @@ MODELS = {
 # to attach precise word times to any transcript, whatever produced it.
 ALIGNER_MODEL = {
     'id': 'mms-fa-aligner',
-    'repo': 'facebook/mms-300m-1130-forced-aligner',
+    'repo': 'MahmoudAshraf/mms-300m-1130-forced-aligner',
     'label': 'MMS Forced Aligner (word timing)',
     'size_gb': 1.2,
     'notes': ('Supplies precise per-word start/end times for models that do not '
               'report their own, and tightens the approximate timings that '
               "Whisper derives from cross-attention. Recommended for captions."),
 }
+
+# Speaker separation. ECAPA-TDNN turns a passage of speech into a vector that
+# describes the voice rather than the words, which is what lets the same person
+# be recognised across a whole timeline. Small, and ungated — unlike pyannote's
+# diarisation weights, which need a licence acceptance and an access token.
+DIARIZER_MODEL = {
+    'id': 'ecapa-speaker-embeddings',
+    'repo': 'speechbrain/spkrec-ecapa-voxceleb',
+    'label': 'ECAPA Speaker Embeddings (speaker separation)',
+    'size_gb': 0.08,
+    'notes': ('Identifies who is speaking, so captions break at every change of '
+              'voice and never put two people on one line. Needs word timings, '
+              'so it pairs with the aligner.'),
+}
+
+# Models that are not transcription engines but still install and remove like
+# one from the Settings panel.
+EXTRA_MODELS = {m['id']: m for m in (ALIGNER_MODEL, DIARIZER_MODEL)}
 
 
 def is_apple_silicon():
@@ -266,8 +287,20 @@ RUNTIMES = {
         'module': 'transformers',
         'platforms': ['any'],
         'size_mb': 2500,
-        'notes': ('Needed for Cohere Transcribe and Granite Speech, and it also '
-                  'provides the word-timing aligner. Large download.'),
+        'notes': ('Needed for Cohere Transcribe, and it also provides the '
+                  'word-timing aligner. Large download.'),
+    },
+    ENGINE_GRANITE_SPEECH: {
+        'id': ENGINE_GRANITE_SPEECH,
+        'label': 'Transformers + PyTorch (Granite Speech)',
+        'packages': ['transformers>=4.52.1', 'torch>=2.2.0', 'torchaudio>=2.2.0'],
+        'module': 'transformers',
+        'platforms': ['any'],
+        'size_mb': 2500,
+        'notes': ('Same underlying packages as Transformers + PyTorch, pinned to '
+                  'a newer transformers release — Granite Speech\'s processor '
+                  'classes only exist from 4.52.1 onward. Already satisfied if '
+                  'that runtime is installed and current.'),
     },
     ENGINE_FASTER_WHISPER: {
         'id': ENGINE_FASTER_WHISPER,
@@ -289,6 +322,17 @@ RUNTIMES = {
         'notes': ('Isolates the dialogue from a music bed before transcribing. The '
                   'single biggest accuracy gain on advertising and promo material, '
                   'at the cost of a slow extra pass.'),
+    },
+    'diarizer-speechbrain': {
+        'id': 'diarizer-speechbrain',
+        'label': 'SpeechBrain (speaker separation)',
+        'packages': ['speechbrain>=1.0.0', 'torch>=2.2.0', 'torchaudio>=2.2.0'],
+        'module': 'speechbrain',
+        'platforms': ['any'],
+        'size_mb': 2300,
+        'notes': ('Works out who is speaking, so each caption holds one voice and '
+                  'carries their name. Shares torch with the aligner, so on top of '
+                  'that runtime it is a small extra download.'),
     },
     'aligner-torch': {
         'id': 'aligner-torch',
@@ -360,6 +404,7 @@ def engine_available(engine):
         ENGINE_MLX_PARAKEET: 'parakeet_mlx',
         ENGINE_MLX_QWEN3: 'mlx_qwen3_asr',
         ENGINE_TRANSFORMERS: 'transformers',
+        ENGINE_GRANITE_SPEECH: 'transformers',
         ENGINE_FASTER_WHISPER: 'faster_whisper',
     }.get(engine)
     if not module:
