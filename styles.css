@@ -70,6 +70,7 @@
 
   /* --- layout ---------------------------------------------------------- */
   --header-h: 48px;
+  --film-bar-h: 32px;
   --panel-header-h: 34px;
   --transport-h: 44px;
   --timeline-h: 190px;
@@ -489,6 +490,177 @@ svg[viewBox]:not(.icon):not(.brand-icon) {
   height: 1px;
   background: var(--border);
   margin: var(--s1) var(--s2);
+}
+
+/* ==========================================================================
+   Film tab strip
+
+   A project is a job; the films inside it are separate edits. The strip reads
+   like Premiere's sequence tabs: the active edit is lifted out of the bar with
+   the accent line, and every other tab stays quiet so the eye is not pulled
+   away from the program monitor.
+   ========================================================================== */
+
+.film-bar {
+  flex: 0 0 auto;
+  height: var(--film-bar-h);
+  display: flex;
+  align-items: stretch;
+  gap: var(--s1);
+  padding: 0 var(--s4);
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
+}
+
+.film-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: var(--s1);
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.film-tabs::-webkit-scrollbar { height: 0; }
+
+.film-tab {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: 0 0 auto;
+  max-width: 260px;
+  padding: 0 var(--s2) 0 var(--s3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--fs-base);
+  cursor: pointer;
+}
+.film-tab:hover { background: var(--bg-hover); color: var(--text); }
+
+.film-tab.active {
+  background: var(--bg-panel);
+  border-bottom-color: var(--accent);
+  color: var(--text);
+}
+
+.film-tab-name {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.film-tab-meta {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+.film-tab.active .film-tab-meta { color: var(--text-muted); }
+
+/* Amber, not red: media that needs relinking is a state to resolve, not a
+   failure — the captions are all still there. */
+.film-tab-warn { color: var(--warn); }
+
+.film-tab-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+.film-tab:hover .film-tab-close,
+.film-tab.active .film-tab-close { opacity: 1; }
+.film-tab-close:hover { background: var(--bg-active); color: var(--danger); }
+
+.film-tab-rename {
+  width: 130px;
+  height: 22px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-sm);
+  background: var(--bg-input);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-base);
+}
+
+.film-add {
+  flex: 0 0 auto;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.film-add:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border-strong); }
+.film-add .icon { width: 14px; height: 14px; }
+
+.film-bar-spacer { flex: 1 1 auto; min-width: var(--s3); }
+
+.film-relink {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 22px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--warn);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.film-relink:hover { background: rgba(224, 160, 50, 0.12); }
+
+.project-chip {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 24px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  max-width: 280px;
+}
+.project-chip:hover { background: var(--bg-hover); color: var(--text); }
+.project-chip #projectNameLabel {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dirty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex: 0 0 auto;
 }
 
 /* ==========================================================================

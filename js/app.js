@@ -52,6 +52,35 @@ document.addEventListener('DOMContentLoaded', async () => {
   // without paying for another model run.
   let lastTranscription = null;
 
+  // One project == one job. Inside it sits a list of films: separate edits,
+  // each with its own media, captions, caption style and aspect ratio. Only the
+  // active film is live in the editor; the rest sit in the project record and
+  // are swapped in when their tab is clicked.
+  const project = new ProjectManager({
+    fps: FPS,
+    defaultPreset: { ...playerController.activePreset }
+  });
+
+  // Session-only state per film, keyed by film id: the File handle, its object
+  // URL and its decoded waveform. None of it can live in a text project file,
+  // which is why re-opening a project asks for the media to be relinked.
+  const filmRuntimes = new Map();
+
+  // Set while the editor is being repointed at another film, so the change
+  // notifications that repointing causes are not mistaken for edits.
+  let swappingFilm = false;
+
+  // Where the project is parked between launches. Declared up here because
+  // bootProject() runs long before the project section below is reached, and a
+  // `let`/`const` is unusable until its own line executes.
+  const AUTOSAVE_KEY = 'transcriber.project.autosave';
+  const AUTOSAVE_PATH_KEY = 'transcriber.project.path';
+  let autosaveTimer = null;
+
+  // Waveform decoding draws straight into the one shared timeline, so decodes
+  // are run one at a time and the visible waveform is put back afterwards.
+  let waveformQueue = Promise.resolve();
+
   // Assigned when the transcribe dialog binds; keeps the model dropdown and the
   // language/alignment rules in one place while staying callable from outside.
   let applyModelRules = () => {};
@@ -65,6 +94,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   window.__transcriber = transcriber;
   window.__settings = settings;
   window.__segmenter = segmenter;
+  window.__project = project;
   window.__applyTranscription = applyTranscription;
 
   // --- Toast notifications (non-blocking replacement for alert()) ---
@@ -90,28 +120,46 @@ document.addEventListener('DOMContentLoaded', async () => {
   bindTimelineToolbar();
   bindExportModal();
   bindTranscribeModal();
+  // After bindAspectRatioControls, which publishes an initial aspect through
+  // the same callbacks the project listens on — binding first would have the
+  // app boot already claiming unsaved changes.
+  bindProjectUI();
   settings.bind();
   bindKeyboardShortcuts();
 
   applyPresetToUI(playerController.activePreset);
 
-  // --- Initial Demo Setup ---
-  initSampleMediaAndSubtitles();
+  const STARTER_CAPTIONS = [
+    { start: 1.0, end: 4.5, text: "Welcome to Taylor's Transcriber!", speaker: "Host" },
+    { start: 5.0, end: 9.2, text: "Designed with Premiere Pro workflows in mind.", speaker: "Host" },
+    { start: 10.0, end: 14.0, text: "Drag subtitles on the timeline or edit timestamps on the left.", speaker: "Editor" },
+    { start: 14.8, end: 19.5, text: "Import your .prfpset preset files to customize style presets!", speaker: "Editor" },
+    { start: 20.0, end: 24.5, text: "Export to ProRes 4444 with alpha, in any aspect ratio.", speaker: "Host" }
+  ];
 
-  function initSampleMediaAndSubtitles() {
+  /**
+   * Puts a project on screen at launch: the one autosaved from the last session
+   * if there is one, otherwise a fresh single-film project carrying the starter
+   * captions so the editor is not an empty grid on first run.
+   *
+   * Called from the very last line of this file rather than here. Restoring a
+   * film drives the whole editor — transport, timeline, caption list — and those
+   * handlers close over `let` bindings declared further down, which cannot be
+   * touched until their own line has run.
+   */
+  function bootProject() {
     setupDemoPicture();
 
-    const starterSubs = [
-      { start: 1.0, end: 4.5, text: "Welcome to Taylor's Transcriber!", speaker: "Host" },
-      { start: 5.0, end: 9.2, text: "Designed with Premiere Pro workflows in mind.", speaker: "Host" },
-      { start: 10.0, end: 14.0, text: "Drag subtitles on the timeline or edit timestamps on the left.", speaker: "Editor" },
-      { start: 14.8, end: 19.5, text: "Import your .prfpset preset files to customize style presets!", speaker: "Editor" },
-      { start: 20.0, end: 24.5, text: "Export to ProRes 4444 with alpha, in any aspect ratio.", speaker: "Host" }
-    ];
+    const restored = restoreAutosave();
+    if (!restored) {
+      const film = project.getActive();
+      film.subtitles = STARTER_CAPTIONS.map((sub, i) => ({ id: `sub_demo_${i}`, ...sub }));
+      film.preset = { ...playerController.activePreset };
+    }
 
-    subManager.setSubtitles(starterSubs);
-    timelineController.resizeAndDraw();
-    playerController.renderOverlay();
+    applyActiveFilm();
+    project.dirty = false;
+    renderProjectUI();
 
     // Web fonts arrive after first paint; repaint so the preview shows the real
     // typeface rather than the fallback.
@@ -120,6 +168,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         playerController.fitProgramFrame();
         playerController.renderOverlay();
       });
+    }
+
+    if (restored) {
+      const waiting = unlinkedCount();
+      toast(`Reopened "${project.name}" — ${project.getFilms().length} film`
+        + `${project.getFilms().length === 1 ? '' : 's'}.`
+        + (waiting ? ` ${waiting} need media relinking.` : ''), 'info', 7000);
     }
   }
 
@@ -190,17 +245,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Exports
     document.getElementById('btnExportSrt').addEventListener('click', () => {
       if (!requireCaptions()) return;
-      saveTextFile(subManager.exportSRT(), 'subtitles.srt', 'text/plain');
+      saveTextFile(subManager.exportSRT(), exportName('.srt'), 'text/plain');
     });
 
     document.getElementById('btnExportVtt').addEventListener('click', () => {
       if (!requireCaptions()) return;
-      saveTextFile(subManager.exportVTT(), 'subtitles.vtt', 'text/vtt');
+      saveTextFile(subManager.exportVTT(), exportName('.vtt'), 'text/vtt');
     });
 
     document.getElementById('btnExportXml').addEventListener('click', () => {
       if (!requireCaptions()) return;
-      saveTextFile(subManager.exportPremiereXml(playerController.project), 'sequence_subtitles.xml', 'application/xml');
+      saveTextFile(subManager.exportPremiereXml(playerController.project),
+        exportName('_sequence.xml'), 'application/xml');
     });
 
     document.getElementById('btnExportPreset').addEventListener('click', () => {
@@ -289,7 +345,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const file = files[0];
       const lower = file.name.toLowerCase();
-      if (/\.(srt|vtt)$/.test(lower)) {
+      if (lower.endsWith(PROJECT_EXT)) {
+        if (!confirmDiscard('Open the dropped project')) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => adoptProjectText(evt.target.result, '');
+        reader.onerror = () => toast(`Could not read "${file.name}".`, 'error');
+        reader.readAsText(file);
+      } else if (/\.(srt|vtt)$/.test(lower)) {
         const reader = new FileReader();
         reader.onload = (evt) => {
           subManager.parseSRT(evt.target.result);
@@ -318,14 +380,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function handleMediaFile(file) {
-    const objectUrl = URL.createObjectURL(file);
-    playerController.loadMedia(file, objectUrl);
-    document.getElementById('mediaInfoLabel').textContent = file.name;
-    document.getElementById('programFrame').classList.add('has-media');
-    timelineController.loadAudioWaveform(file);
-    transcriber.setFile(file);
-    lastTranscription = null; // belongs to the previous media
-    toast(`Loaded "${file.name}".`, 'success');
+    attachMediaToFilm(project.activeId, file, { fresh: true });
+    toast(`Loaded "${file.name}" into "${project.getActive().name}".`, 'success');
+  }
+
+  /**
+   * Exports are named from the job and the edit. Three films in one project all
+   * writing "subtitles.srt" into the same delivery folder is a real way to lose
+   * a deliverable, and the operator has already named both things.
+   */
+  function exportName(suffix) {
+    const film = project.getActive();
+    const job = ProjectManager.slug(project.name, 'project');
+    const edit = ProjectManager.slug(film ? film.name : 'film', 'film');
+    return `${job}_${edit}${suffix}`;
   }
 
   function readPresetFile(file) {
@@ -894,7 +962,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           rangeMode: rangeSelect.value,
           profile: parseInt(profileSelect.value, 10),
           padStart: 0.5,
-          filename: 'subtitles_alpha.mov',
+          filename: exportName('_alpha.mov'),
           onFontWarning: (missing) => {
             toast(`"${missing.join(', ')}" is not available — the export will use the fallback typeface.`, 'warn', 7000);
           },
@@ -1110,9 +1178,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function readSegmentSettings() {
       return {
-        maxCharsPerLine: parseInt(segChars.value, 10),
-        maxLines: parseInt(segLines.value, 10),
-        maxDurationSec: parseFloat(segDur.value),
+        ...readSegmentUI(),
         replace: document.getElementById('transcribeReplace').checked
       };
     }
@@ -1304,8 +1370,693 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  // --- Projects & Films ---
+  /**
+   * A job is one project file; the films inside it are separate edits that
+   * happen to be delivered together. Each film owns its media, its captions,
+   * its caption style and its aspect ratio — a film is not a re-render of
+   * another film at a different ratio, so nothing is shared between them.
+   *
+   * Rather than run four editors at once, one editor is repointed: the live
+   * state is read back into the film being left (`captureActiveFilm`) and the
+   * incoming film is pushed into the same controllers (`applyActiveFilm`).
+   */
+  function bindProjectUI() {
+    project.onChange(() => {
+      renderProjectUI();
+      scheduleAutosave();
+    });
+
+    document.getElementById('btnAddFilm').addEventListener('click', addFilm);
+    document.getElementById('btnAddFilmMenu').addEventListener('click', addFilm);
+    document.getElementById('btnDuplicateFilm').addEventListener('click', duplicateActiveFilm);
+    document.getElementById('btnRenameFilm').addEventListener('click', () => beginRenameFilm(project.activeId));
+    document.getElementById('btnDeleteFilm').addEventListener('click', () => deleteFilm(project.activeId));
+
+    document.getElementById('btnNewProject').addEventListener('click', newProject);
+    document.getElementById('btnOpenProject').addEventListener('click', openProject);
+    document.getElementById('btnSaveProject').addEventListener('click', () => saveProject());
+    document.getElementById('btnSaveProjectAs').addEventListener('click', () => saveProject({ saveAs: true }));
+
+    document.getElementById('btnRelinkBanner').addEventListener('click', promptRelink);
+    document.getElementById('btnRelinkMediaMenu').addEventListener('click', promptRelink);
+
+    document.getElementById('projectChip').addEventListener('click', () => {
+      const name = prompt('Project name:', project.name);
+      if (name === null) return;
+      if (project.setName(name)) scheduleAutosave();
+    });
+
+    document.getElementById('projectFileInput').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      const reader = new FileReader();
+      // A file chosen through the browser gives no path, so a later plain Save
+      // downloads a new copy rather than pretending it can overwrite in place.
+      reader.onload = (evt) => adoptProjectText(evt.target.result, '');
+      reader.onerror = () => toast(`Could not read "${file.name}".`, 'error');
+      reader.readAsText(file);
+    });
+
+    document.getElementById('relinkFilesInput').addEventListener('change', (e) => {
+      const files = Array.from(e.target.files || []);
+      e.target.value = '';
+      if (files.length) relinkMedia(files);
+    });
+
+    subManager.onChange(() => {
+      if (!swappingFilm) project.markDirty();
+      renderFilmTabs();   // the tab shows a live caption count
+      scheduleAutosave();
+    });
+
+    playerController.onProjectChange(() => {
+      if (swappingFilm) return;
+      const film = project.getActive();
+      if (film) film.aspectId = playerController.project.id;
+      project.markDirty();
+      renderFilmTabs();
+      scheduleAutosave();
+    });
+
+    playerController.onPresetChange((preset) => {
+      if (swappingFilm) return;
+      const film = project.getActive();
+      if (film) film.preset = { ...preset };
+      project.markDirty();
+      scheduleAutosave();
+    });
+  }
+
+  // --- capture / apply ----------------------------------------------------
+  /** Reads the live editor state back into the film record it belongs to. */
+  function captureActiveFilm() {
+    const film = project.getActive();
+    if (!film) return null;
+
+    film.subtitles = subManager.getSubtitles().map(sub => ({ ...sub }));
+    film.selectedId = subManager.selectedId;
+    film.aspectId = playerController.project.id;
+    film.preset = { ...playerController.activePreset };
+    film.zoom = timelineController.zoomLevel;
+    film.playhead = playerController.getCurrentTime();
+    film.transcription = lastTranscription;
+    film.segment = readSegmentUI();
+    return film;
+  }
+
+  /** Points every controller at the active film. The inverse of the above. */
+  function applyActiveFilm() {
+    const film = project.getActive();
+    if (!film) return;
+
+    // try/finally: this drives most of the editor, and a flag left stuck on by
+    // a throw halfway through would silently disable dirty tracking for the
+    // rest of the session.
+    swappingFilm = true;
+    try {
+      applyFilmState(film);
+    } finally {
+      swappingFilm = false;
+    }
+  }
+
+  function applyFilmState(film) {
+    playerController.pause();
+
+    const rt = filmRuntimes.get(film.id);
+    if (rt && rt.file) {
+      playerController.loadMedia(rt.file, rt.objectUrl);
+      transcriber.setFile(rt.file);
+      document.getElementById('mediaInfoLabel').textContent = rt.file.name;
+      document.getElementById('programFrame').classList.add('has-media');
+      timelineController.setWaveform(rt.peaks, rt.peaksDuration);
+    } else {
+      // Showing the previous film's picture under this film's captions would
+      // misrepresent what is being captioned, so fall back to the placeholder.
+      playerController.unloadMedia();
+      transcriber.setFile(null);
+      document.getElementById('mediaInfoLabel').textContent =
+        film.media && film.media.name ? `${film.media.name} — not linked` : 'No media loaded';
+      document.getElementById('programFrame').classList.remove('has-media');
+      timelineController.setWaveform(null, 0);
+    }
+
+    setAspect(film.aspectId);
+    playerController.setPreset(film.preset);
+    applyPresetToUI(film.preset);
+    syncPresetSelect(film.preset);
+
+    subManager.selectedId = null;
+    subManager.setSubtitles(film.subtitles);
+    if (film.selectedId && subManager.getSubtitles().some(sub => sub.id === film.selectedId)) {
+      subManager.selectSubtitle(film.selectedId);
+    }
+
+    lastTranscription = film.transcription || null;
+    writeSegmentUI(film.segment);
+
+    const zoomSlider = document.getElementById('timelineZoom');
+    zoomSlider.value = film.zoom;
+    timelineController.setZoom(film.zoom);
+
+    timelineController.resizeAndDraw();
+    playerController.seek(film.playhead || 0);
+    playerController.renderOverlay();
+  }
+
+  /** Keeps the preset dropdown pointing at the film's style where it can. */
+  function syncPresetSelect(preset) {
+    const select = document.getElementById('presetSelect');
+    if (!select || !preset || !preset.id) return;
+    const match = Array.from(select.options).find(opt => opt.value === preset.id);
+    if (match) select.value = preset.id;
+  }
+
+  function readSegmentUI() {
+    return {
+      maxCharsPerLine: parseInt(document.getElementById('segMaxChars').value, 10),
+      maxLines: parseInt(document.getElementById('segMaxLines').value, 10),
+      maxDurationSec: parseFloat(document.getElementById('segMaxDur').value)
+    };
+  }
+
+  function writeSegmentUI(seg) {
+    const chars = document.getElementById('segMaxChars');
+    const lines = document.getElementById('segMaxLines');
+    const dur = document.getElementById('segMaxDur');
+    if (!chars || !lines || !dur) return;
+
+    if (seg) {
+      if (seg.maxCharsPerLine) chars.value = seg.maxCharsPerLine;
+      if (seg.maxLines) lines.value = seg.maxLines;
+      if (seg.maxDurationSec) dur.value = seg.maxDurationSec;
+    }
+    document.getElementById('segMaxCharsVal').textContent = chars.value;
+    document.getElementById('segMaxDurVal').textContent = `${parseFloat(dur.value).toFixed(1)}s`;
+  }
+
+  // --- film operations ----------------------------------------------------
+  function switchFilm(filmId) {
+    if (!project.getFilm(filmId) || filmId === project.activeId) return;
+    captureActiveFilm();
+    project.setActive(filmId);
+    applyActiveFilm();
+    renderProjectUI();
+  }
+
+  function stepFilm(delta) {
+    if (project.getFilms().length < 2) return;
+    captureActiveFilm();
+    if (!project.stepActive(delta)) return;
+    applyActiveFilm();
+    renderProjectUI();
+  }
+
+  function addFilm() {
+    captureActiveFilm();
+    const film = project.addFilm({
+      name: project.uniqueName(`Film ${project.getFilms().length + 1}`),
+      // A new edit inherits the look you were just working in: within one job
+      // the caption style is normally the constant and the cut is what changes.
+      preset: { ...playerController.activePreset },
+      aspectId: playerController.project.id,
+      segment: readSegmentUI()
+    });
+    project.setActive(film.id);
+    applyActiveFilm();
+    renderProjectUI();
+    scheduleAutosave();
+    toast(`Added "${film.name}". Load its media from Import.`, 'success');
+  }
+
+  function duplicateActiveFilm() {
+    captureActiveFilm();
+    const source = project.getActive();
+    const copy = project.duplicateFilm(project.activeId);
+    if (!copy) return;
+
+    // Same media file, so carry the live handle across rather than making the
+    // operator relink a film they created a second ago. A separate object URL
+    // keeps the two films' lifetimes independent.
+    const rt = filmRuntimes.get(source.id);
+    if (rt && rt.file) {
+      filmRuntimes.set(copy.id, {
+        file: rt.file,
+        objectUrl: URL.createObjectURL(rt.file),
+        peaks: rt.peaks,
+        peaksDuration: rt.peaksDuration
+      });
+    }
+
+    project.setActive(copy.id);
+    applyActiveFilm();
+    renderProjectUI();
+    scheduleAutosave();
+    toast(`Duplicated to "${copy.name}".`, 'success');
+  }
+
+  function deleteFilm(filmId) {
+    const film = project.getFilm(filmId);
+    if (!film) return;
+    if (project.getFilms().length <= 1) {
+      toast('A project always holds at least one film. Add another before deleting this one.', 'warn');
+      return;
+    }
+
+    const count = filmId === project.activeId
+      ? subManager.getSubtitles().length
+      : film.subtitles.length;
+    if (!confirm(`Delete "${film.name}" and its ${count} caption${count === 1 ? '' : 's'}? This cannot be undone.`)) {
+      return;
+    }
+
+    const wasActive = filmId === project.activeId;
+    if (!wasActive) captureActiveFilm();
+    releaseRuntime(filmId);
+    project.removeFilm(filmId);
+    if (wasActive) applyActiveFilm();
+    renderProjectUI();
+    scheduleAutosave();
+  }
+
+  function beginRenameFilm(filmId) {
+    const film = project.getFilm(filmId);
+    const tab = document.querySelector(`.film-tab[data-id="${filmId}"]`);
+    if (!film || !tab) return;
+
+    tab.innerHTML = '';
+    const input = document.createElement('input');
+    input.className = 'film-tab-rename';
+    input.value = film.name;
+    tab.appendChild(input);
+    input.focus();
+    input.select();
+
+    let settled = false;
+    const commit = (save) => {
+      if (settled) return;
+      settled = true;
+      if (save) project.renameFilm(filmId, input.value);
+      renderProjectUI();
+      scheduleAutosave();
+    };
+
+    // Swallowed so Escape does not also close the editor's modals and Enter
+    // does not reach the transport shortcuts.
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') commit(true);
+      else if (e.key === 'Escape') commit(false);
+    });
+    input.addEventListener('blur', () => commit(true));
+  }
+
+  // --- media linking ------------------------------------------------------
+  /**
+   * @param {Object} opts  `fresh: true` means this is different media, not the
+   *   same file being relinked — so any transcription of the old audio is
+   *   dropped rather than left describing a file that is no longer loaded.
+   */
+  function attachMediaToFilm(filmId, file, opts = {}) {
+    const film = project.getFilm(filmId);
+    if (!film || !file) return;
+
+    const rt = filmRuntimes.get(filmId) || {};
+    if (rt.objectUrl) URL.revokeObjectURL(rt.objectUrl);
+    rt.file = file;
+    rt.objectUrl = URL.createObjectURL(file);
+    rt.peaks = null;
+    rt.peaksDuration = 0;
+    filmRuntimes.set(filmId, rt);
+
+    film.media = { name: file.name, size: file.size || 0, type: file.type || '' };
+    if (opts.fresh) film.transcription = null;
+    project.markDirty();
+
+    if (filmId === project.activeId) {
+      playerController.loadMedia(file, rt.objectUrl);
+      transcriber.setFile(file);
+      document.getElementById('mediaInfoLabel').textContent = file.name;
+      document.getElementById('programFrame').classList.add('has-media');
+      if (opts.fresh) lastTranscription = null;
+    }
+
+    decodeWaveformFor(filmId, file);
+    renderProjectUI();
+    scheduleAutosave();
+  }
+
+  function decodeWaveformFor(filmId, file) {
+    waveformQueue = waveformQueue.then(async () => {
+      const rt = filmRuntimes.get(filmId);
+      if (!rt || rt.file !== file) return; // the film moved on while we queued
+      await timelineController.loadAudioWaveform(file);
+      const wave = timelineController.getWaveform();
+      rt.peaks = wave.peaks;
+      rt.peaksDuration = wave.duration;
+      if (project.activeId !== filmId) {
+        const active = filmRuntimes.get(project.activeId) || {};
+        timelineController.setWaveform(active.peaks, active.peaksDuration);
+      }
+    }).catch(() => { /* an undecodable file just means no waveform */ });
+    return waveformQueue;
+  }
+
+  function hasLiveMedia(filmId) {
+    const rt = filmRuntimes.get(filmId);
+    return !!(rt && rt.file);
+  }
+
+  function unlinkedCount() {
+    return project.unlinkedFilms(hasLiveMedia).length;
+  }
+
+  function promptRelink() {
+    if (unlinkedCount() === 0) {
+      toast('Every film in this project already has its media.', 'info');
+      return;
+    }
+    document.getElementById('relinkFilesInput').click();
+  }
+
+  /**
+   * Matches chosen files to the films waiting for them by filename first, then
+   * hands whatever is left to the still-waiting films in order — a renamed file
+   * is the common case and should not leave the operator stuck.
+   *
+   * One file can back several films: duplicating an edit leaves two films
+   * pointing at the same rushes. So a filename match satisfies every film
+   * waiting for that name, not just the first one found.
+   */
+  function relinkMedia(files) {
+    const waiting = () => project.getFilms().filter(
+      film => film.media && film.media.name && !hasLiveMedia(film.id) && !claimed.has(film.id));
+    const claimed = new Set();
+    const pairs = [];
+    let namedCount = 0;
+
+    files.forEach(file => {
+      const matches = waiting().filter(
+        film => film.media.name.toLowerCase() === file.name.toLowerCase());
+      matches.forEach(film => {
+        claimed.add(film.id);
+        pairs.push([film.id, file]);
+        namedCount++;
+      });
+    });
+
+    const spare = files.filter(file => !pairs.some(([, f]) => f === file));
+    const orderedCount = Math.min(spare.length, waiting().length);
+    waiting().slice(0, orderedCount).forEach((film, i) => {
+      claimed.add(film.id);
+      pairs.push([film.id, spare[i]]);
+    });
+    const unused = spare.length - orderedCount;
+
+    pairs.forEach(([filmId, file]) => attachMediaToFilm(filmId, file, { fresh: false }));
+
+    // Only re-point the editor if the film on screen is one of the ones that
+    // just gained media — otherwise this would yank the playhead for nothing.
+    if (claimed.has(project.activeId)) applyActiveFilm();
+    renderProjectUI();
+
+    const parts = [];
+    if (namedCount) parts.push(`${namedCount} matched by filename`);
+    if (orderedCount) parts.push(`${orderedCount} matched in order — check they are the right cuts`);
+    if (unused) parts.push(`${unused} file(s) had no film waiting`);
+
+    toast(pairs.length
+      ? `Relinked ${pairs.length} film${pairs.length === 1 ? '' : 's'}: ${parts.join('; ')}.`
+      : 'None of those files matched a film waiting for media.',
+      orderedCount || unused ? 'warn' : 'success', 8000);
+  }
+
+  function releaseRuntime(filmId) {
+    const rt = filmRuntimes.get(filmId);
+    if (rt && rt.objectUrl) URL.revokeObjectURL(rt.objectUrl);
+    filmRuntimes.delete(filmId);
+  }
+
+  function releaseAllRuntimes() {
+    Array.from(filmRuntimes.keys()).forEach(releaseRuntime);
+  }
+
+  // --- project file I/O ---------------------------------------------------
+  function nativeProjectApi() {
+    const api = window.pywebview && window.pywebview.api;
+    return api && api.project_save && api.project_open ? api : null;
+  }
+
+  async function saveProject(opts = {}) {
+    captureActiveFilm();
+    const json = project.serialize();
+    const filename = `${ProjectManager.slug(project.name, 'project')}${PROJECT_EXT}`;
+    const api = nativeProjectApi();
+
+    if (api) {
+      try {
+        // No path, or Save As, means "ask me where" — otherwise Cmd+S has to
+        // overwrite silently, which is the whole point of having a path.
+        const res = await api.project_save(filename, json, opts.saveAs ? '' : (project.path || ''));
+        if (res && res.ok) {
+          project.markSaved(res.path);
+          rememberProjectPath(res.path);
+          toast(`Project saved to ${res.path}`, 'success', 6000);
+          return true;
+        }
+        if (res && res.error && res.error !== 'Save cancelled.') {
+          toast(res.error, 'error', 8000);
+        }
+        return false;
+      } catch (e) {
+        // Fall through to the browser download rather than losing the save.
+      }
+    }
+
+    downloadFile(json, filename, 'application/json');
+    project.markSaved();
+    toast(`Downloaded ${filename}.`, 'success');
+    return true;
+  }
+
+  async function openProject() {
+    if (!confirmDiscard('Open another project')) return;
+    const api = nativeProjectApi();
+
+    if (api) {
+      try {
+        const res = await api.project_open();
+        if (res && res.ok) {
+          adoptProjectText(res.content, res.path);
+          return;
+        }
+        if (res && res.error && res.error !== 'Open cancelled.') {
+          toast(res.error, 'error', 8000);
+        }
+        return;
+      } catch (e) {
+        // Fall through to the file input.
+      }
+    }
+    document.getElementById('projectFileInput').click();
+  }
+
+  function adoptProjectText(text, path) {
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      toast('That file is not valid JSON, so it is not a project file.', 'error', 7000);
+      return;
+    }
+
+    try {
+      project.load(data);
+    } catch (e) {
+      toast(e.message, 'error', 8000);
+      return;
+    }
+
+    releaseAllRuntimes();
+    project.path = path || '';
+    rememberProjectPath(project.path);
+    lastTranscription = null;
+    applyActiveFilm();
+    renderProjectUI();
+    writeAutosave();
+
+    const waiting = unlinkedCount();
+    toast(`Opened "${project.name}" — ${project.getFilms().length} film`
+      + `${project.getFilms().length === 1 ? '' : 's'}.`
+      + (waiting ? ` ${waiting} need media relinking.` : ''), 'success', 8000);
+  }
+
+  function newProject() {
+    if (!confirmDiscard('Start a new project')) return;
+    releaseAllRuntimes();
+    project.reset();
+    project.path = '';
+    rememberProjectPath('');
+    lastTranscription = null;
+    applyActiveFilm();
+    renderProjectUI();
+    writeAutosave();
+    toast('New project started.', 'success');
+  }
+
+  function confirmDiscard(action) {
+    if (!project.dirty) return true;
+    return confirm(`"${project.name}" has unsaved changes. ${action} anyway?`);
+  }
+
+  // --- autosave -----------------------------------------------------------
+  function scheduleAutosave() {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(writeAutosave, 1500);
+  }
+
+  function writeAutosave() {
+    captureActiveFilm();
+    try {
+      localStorage.setItem(AUTOSAVE_KEY, project.serialize());
+    } catch (e) {
+      // A long transcription can push a project past the storage quota. The
+      // captions are what has to survive a reload, so drop the raw
+      // transcriptions and try once more rather than losing the autosave.
+      try {
+        const lean = project.toJSON();
+        lean.films.forEach(film => { film.transcription = null; });
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(lean));
+      } catch (e2) { /* private mode, or still too large — the .ttproj is the real safety net */ }
+    }
+  }
+
+  function rememberProjectPath(path) {
+    try { localStorage.setItem(AUTOSAVE_PATH_KEY, path || ''); } catch (e) { /* private mode */ }
+  }
+
+  function restoreAutosave() {
+    try {
+      const raw = localStorage.getItem(AUTOSAVE_KEY);
+      if (!raw) return false;
+      project.load(JSON.parse(raw));
+      project.path = localStorage.getItem(AUTOSAVE_PATH_KEY) || '';
+      return true;
+    } catch (e) {
+      return false; // a corrupt or older autosave must never block startup
+    }
+  }
+
+  // --- film bar rendering -------------------------------------------------
+  function renderProjectUI() {
+    renderFilmTabs();
+    renderProjectChip();
+    renderRelinkBanner();
+  }
+
+  function renderFilmTabs() {
+    const strip = document.getElementById('filmTabs');
+    if (!strip) return;
+    const films = project.getFilms();
+    strip.innerHTML = '';
+
+    films.forEach(film => {
+      const isActive = film.id === project.activeId;
+      // The active film's captions live in the manager, not the record, so read
+      // the count from there or a tab lags a caption behind every edit.
+      const count = isActive ? subManager.getSubtitles().length : film.subtitles.length;
+      const aspect = (playerController.getAspectPresets()[film.aspectId] || {}).label || film.aspectId;
+      const unlinked = !!(film.media && film.media.name) && !hasLiveMedia(film.id);
+
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = `film-tab${isActive ? ' active' : ''}`;
+      tab.dataset.id = film.id;
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-selected', String(isActive));
+      tab.title = `${film.name} — ${aspect}, ${count} caption${count === 1 ? '' : 's'}`
+        + (unlinked ? `\nMedia "${film.media.name}" is not linked in this session.` : '')
+        + '\nDouble-click to rename.';
+
+      const name = document.createElement('span');
+      name.className = 'film-tab-name';
+      name.textContent = film.name;
+      tab.appendChild(name);
+
+      const meta = document.createElement('span');
+      meta.className = 'film-tab-meta';
+      meta.textContent = `${String(film.aspectId || '').replace('x', ':')} · ${count}`;
+      tab.appendChild(meta);
+
+      if (unlinked) {
+        const warn = document.createElement('span');
+        warn.className = 'film-tab-meta film-tab-warn';
+        warn.textContent = '⚠';
+        tab.appendChild(warn);
+      }
+
+      if (films.length > 1) {
+        // A <span>, not a <button>: a button inside a button is invalid markup
+        // and browsers disagree about which one the click belongs to.
+        const close = document.createElement('span');
+        close.className = 'film-tab-close';
+        close.setAttribute('role', 'button');
+        close.textContent = '✕';
+        close.title = `Delete "${film.name}"`;
+        close.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deleteFilm(film.id);
+        });
+        tab.appendChild(close);
+      }
+
+      tab.addEventListener('click', () => switchFilm(film.id));
+      tab.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        beginRenameFilm(film.id);
+      });
+      strip.appendChild(tab);
+    });
+  }
+
+  function renderProjectChip() {
+    const label = document.getElementById('projectNameLabel');
+    if (!label) return;
+    label.textContent = project.name;
+    document.getElementById('projectDirtyDot').classList.toggle('hidden', !project.dirty);
+    document.getElementById('projectChip').title =
+      (project.path ? `${project.path}\n` : 'Not written to a file yet\n')
+      + 'Click to rename the project';
+  }
+
+  function renderRelinkBanner() {
+    const btn = document.getElementById('btnRelinkBanner');
+    if (!btn) return;
+    const waiting = unlinkedCount();
+    btn.classList.toggle('hidden', waiting === 0);
+    document.getElementById('relinkLabel').textContent =
+      `${waiting} film${waiting === 1 ? '' : 's'} need${waiting === 1 ? 's' : ''} media`;
+  }
+
   // --- Keyboard Shortcuts ---
   function bindKeyboardShortcuts() {
+    // Project commands are deliberately outside the editor handler below: they
+    // carry a modifier, and Cmd+S has to work while the caret is in a caption
+    // box — that is exactly when you most want it to.
+    window.addEventListener('keydown', (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (key === 's') {
+        e.preventDefault();
+        saveProject({ saveAs: e.shiftKey });
+      } else if (key === 'o') {
+        e.preventDefault();
+        openProject();
+      }
+    });
+
     window.addEventListener('keydown', (e) => {
       // Ignore when typing in inputs/textareas
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
@@ -1399,6 +2150,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         case '=': zoomBy(15); break;
         case '-':
         case '_': zoomBy(-15); break;
+        case '[': stepFilm(-1); break;
+        case ']': stepFilm(1); break;
         case 'delete':
         case 'backspace':
           e.preventDefault();
@@ -1523,4 +2276,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       dctx.fillText(sub, w / 2, h * 0.4);
     });
   }
+
+  // Everything above is now declared, so the project can be put on screen.
+  bootProject();
 });

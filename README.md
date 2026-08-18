@@ -87,6 +87,49 @@ Python package:
 Without it the export still works, but falls back to a ZIP'd transparent PNG
 sequence plus the exact ffmpeg command to convert it yourself.
 
+## Projects and films
+
+A **project** is one job. Inside it sits a list of **films** — the separate
+edits you are delivering for that job: a 60, a 30, a square social cut. Each
+film owns its own media, its own captions, its own caption style and its own
+aspect ratio. A film is not a re-render of another film at a different ratio,
+so nothing is shared between them and editing one never disturbs another.
+
+The strip under the toolbar is the film list. Click a tab to switch to that
+edit — the program monitor, the caption list, the timeline, the style inspector
+and the aspect buttons all repoint to it at once. `[` and `]` step through the
+tabs. Double-click a tab to rename it, and the `+` at the end adds a film.
+
+**Project → Duplicate Film** copies an edit whole — captions, style, ratio, and
+the media link — which is the quick way to start a second cut from the first.
+
+### Saving a project
+
+**Project → Save Project** (`Ctrl/⌘ S`) writes every film in the job to a single
+`.ttproj` file. Save As (`Ctrl/⌘ ⇧ S`) writes a new one; a plain Save after that
+overwrites it silently. `Ctrl/⌘ O` opens one, and a `.ttproj` dropped on the
+program monitor opens too.
+
+The file is plain JSON and holds the captions, per-film aspect ratio and style,
+the segmentation settings and the raw transcription — so the segmentation
+sliders still re-cut an old job without re-running a model.
+
+**It does not hold the video.** A project file has to stay a text file rather
+than a copy of the rushes, so a reopened project shows *n films need media* in
+the film bar. **Project → Relink Media…** takes the files back: they are matched
+to the films by filename first, then whatever is left is handed to the still-
+waiting films in order, so a renamed file does not leave you stuck. One file can
+back several films, which is what a duplicated edit needs.
+
+Exports are named from the job and the edit — `Acme_Launch_Hero_60.srt` — so a
+folder of deliverables from several films cannot collapse into one
+`subtitles.srt` overwriting itself.
+
+The current project is also autosaved to the browser's local storage after every
+edit and reopened at launch, so closing the app does not lose work that was
+never written to a file. That is a safety net, not a substitute for saving —
+it holds one project and lives with the app, not with the job.
+
 ## Aspect ratios
 
 | Ratio | Resolution | |
@@ -178,6 +221,7 @@ needs no ffmpeg.
 | SRT / VTT | Standard subtitle interchange |
 | Premiere sequence XML | FCP7 `xmeml` v4 |
 | Style preset | `.prfpset`, round-trips back through the importer |
+| Project | `.ttproj` — every film in the job, media excluded |
 
 ## Premiere presets
 
@@ -188,10 +232,11 @@ raw-text scan, and understands Premiere's colour encodings (`#rgb`, `#rrggbb`,
 
 ## Interface
 
-The toolbar groups its actions into two menus — **Import** (media, subtitles,
-Premiere presets) and **Export** (ProRes + alpha, SRT, VTT, sequence XML, style
-preset) — with Transcribe, Settings and Help alongside. Every action keeps its
-keyboard shortcut.
+The toolbar groups its actions into three menus — **Project** (new/open/save,
+plus the film operations), **Import** (media, subtitles, Premiere presets) and
+**Export** (ProRes + alpha, SRT, VTT, sequence XML, style preset) — with
+Transcribe, Settings and Help alongside. Every action keeps its keyboard
+shortcut. Below the toolbar, the film strip carries one tab per edit in the job.
 
 One accent colour marks anything actionable. Cyan is reserved for the timeline,
 so cyan always means "time": the playhead, the waveform and every timecode
@@ -214,6 +259,9 @@ readout. Green, amber and red appear only as status, never as button fills.
 | `E` | ProRes + alpha export |
 | `1`–`4` | Aspect ratio |
 | `+` / `-` | Zoom timeline |
+| `[` / `]` | Previous / next film in the project |
+| `Ctrl/⌘ S` | Save project (`⇧` for Save As) |
+| `Ctrl/⌘ O` | Open project |
 | `?` | Shortcuts |
 
 ## Project layout
@@ -234,6 +282,7 @@ js/captionSegmenter.js    word timings -> broadcast-style captions
 model_registry.py         model + runtime metadata, install-state detection
 engines.py                MLX/transformers/CTranslate2 adapters + forced aligner
 js/subtitleManager.js     caption store, timecodes, SRT/VTT/XML
+js/projectManager.js      project/film records, .ttproj serialisation
 js/timeline.js            ruler, waveform, draggable clips, snapping
 js/presetParser.js        Premiere preset import/export
 js/app.js                 UI wiring

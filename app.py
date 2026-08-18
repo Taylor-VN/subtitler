@@ -71,9 +71,10 @@ API_TOKEN = secrets.token_urlsafe(24)
 BRIDGE_ENABLED = False
 BRIDGE_API = None
 
-# Methods the browser fallback may call. save_text_file is deliberately excluded:
-# in a browser the page downloads text exports itself, which is the better
-# behaviour than writing them server-side to a guessed directory.
+# Methods the browser fallback may call. save_text_file, project_save and
+# project_open are deliberately excluded: they need a native file dialog, and
+# without one they would write server-side to a guessed directory. In browser
+# mode the page downloads the project instead and opens it through a file input.
 BRIDGE_METHODS = {
     'get_capabilities',
     'transcribe_probe', 'transcribe_begin', 'transcribe_push_audio',
@@ -358,6 +359,54 @@ class ExportApi:
             return {'ok': True, 'path': out_path}
         except Exception as e:
             return {'ok': False, 'error': str(e)}
+
+    # --- project files (.ttproj) ------------------------------------------
+    def project_save(self, filename, content, path=''):
+        """
+        Write the project.
+
+        A path means "the user already told us where this project lives" — a
+        plain Save then overwrites it silently, which is what Cmd+S has to do
+        while working. Without one a save dialog is shown, so Save As and the
+        first save of a new project both land here.
+        """
+        try:
+            out_path = path if path else self._ask_save_path(filename)
+            if not out_path:
+                return {'ok': False, 'error': 'Save cancelled.'}
+            parent = os.path.dirname(out_path)
+            if parent and not os.path.isdir(parent):
+                return {'ok': False,
+                        'error': f'The folder "{parent}" no longer exists. Use Save As.'}
+            with open(out_path, 'w', encoding='utf-8') as fh:
+                fh.write(content)
+            return {'ok': True, 'path': out_path}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+
+    def project_open(self):
+        try:
+            in_path = self._ask_open_path()
+            if not in_path:
+                return {'ok': False, 'error': 'Open cancelled.'}
+            with open(in_path, 'r', encoding='utf-8') as fh:
+                content = fh.read()
+            return {'ok': True, 'path': in_path, 'content': content}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+
+    def _ask_open_path(self):
+        if webview is None or not webview.windows:
+            return None
+        result = webview.windows[0].create_file_dialog(
+            webview.OPEN_DIALOG,
+            directory=os.path.expanduser('~'),
+            allow_multiple=False,
+            file_types=("Transcriber project (*.ttproj;*.json)", "All files (*.*)"),
+        )
+        if not result:
+            return None
+        return result if isinstance(result, str) else result[0]
 
     def _ask_save_path(self, filename):
         if webview is None or not webview.windows:

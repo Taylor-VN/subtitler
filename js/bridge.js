@@ -79,18 +79,22 @@
       return 'static';
     }
 
-    // Deliberately not exposed over HTTP: in a browser, text exports should be
-    // downloaded by the page rather than written server-side to a guessed
-    // directory. Leaving it absent makes app.js take its download path.
+    // Deliberately not exposed over HTTP: these three need a native file dialog.
+    // In a browser, text exports and project files should be downloaded by the
+    // page — and projects opened through a file input — rather than written or
+    // read server-side at a guessed path. Leaving them absent makes app.js take
+    // its download / file-input path.
+    const NATIVE_ONLY = new Set(['save_text_file', 'project_save', 'project_open']);
+
     const api = makeHttpApi(cfg.token);
     window.pywebview = window.pywebview || {};
     window.pywebview.api = new Proxy(api, {
       get(target, prop) {
-        if (prop === 'save_text_file') return undefined;
+        if (NATIVE_ONLY.has(prop)) return undefined;
         return target[prop];
       },
       has(_t, prop) {
-        return prop !== 'save_text_file';
+        return !NATIVE_ONLY.has(prop);
       }
     });
 
