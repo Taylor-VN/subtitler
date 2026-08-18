@@ -413,6 +413,15 @@ svg[viewBox]:not(.icon):not(.brand-icon) {
   user-select: none;
 }
 .checkbox-label:hover { color: var(--text); }
+/* An option the selected model cannot act on, dimmed rather than hidden so it
+   stays where the operator last saw it. */
+.checkbox-label.disabled,
+.checkbox-label.disabled:hover {
+  color: var(--text-dim);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.checkbox-label.disabled input[type="checkbox"] { cursor: not-allowed; }
 .checkbox-label input[type="checkbox"] {
   width: 13px;
   height: 13px;
@@ -471,6 +480,11 @@ svg[viewBox]:not(.icon):not(.brand-icon) {
   color: var(--text-dim);
   margin-top: 1px;
 }
+
+/* A setting for the exports beneath it rather than an action, so it keeps the
+   menu open when clicked (see menu.js). */
+.menu-item-toggle { cursor: pointer; }
+.menu-item-toggle input { accent-color: var(--accent); flex: 0 0 auto; margin: 0; }
 
 .menu-item-feature { align-items: flex-start; padding-top: var(--s3); padding-bottom: var(--s3); }
 .menu-item-feature .icon { color: var(--accent); margin-top: 1px; }
@@ -841,6 +855,28 @@ svg[viewBox]:not(.icon):not(.brand-icon) {
   padding: var(--s2);
 }
 .caption-textarea:focus { outline: none; border-color: var(--accent); }
+
+/* Who says the line. Deliberately quieter than the caption text: it is a label
+   on the line, not part of it, and it only appears once something has
+   identified the speakers. */
+.caption-speaker {
+  width: 100%;
+  margin-bottom: var(--s1);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 3px var(--s2);
+}
+.caption-speaker:focus {
+  outline: none;
+  border-color: var(--accent);
+  color: var(--text);
+}
 
 /* ==========================================================================
    Program monitor

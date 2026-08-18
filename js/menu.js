@@ -35,8 +35,12 @@
       });
 
       // Selecting an action always dismisses the menu. Listening on the panel
-      // rather than each item means items added later still work.
+      // rather than each item means items added later still work. Items marked
+      // keep-open are settings for the actions below them rather than actions
+      // themselves — closing on those would mean reopening the menu to use the
+      // choice just made.
       panel.addEventListener('click', (e) => {
+        if (e.target.closest('[data-menu-keep-open]')) return;
         if (e.target.closest('.menu-item')) closeAll();
       });
     });

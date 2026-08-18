@@ -366,12 +366,15 @@ class TranscriptionController {
       task: opts.task,
       device: opts.device,
       vad: opts.vad !== false,
+      keep_uncertain: !!opts.keepUncertain,
       beam_size: opts.beamSize || 5,
       engine: opts.engine || 'auto',
       align: opts.align === undefined ? 'auto' : opts.align,
       vocabulary: opts.vocabulary || '',
       suppress_music: !!opts.suppressMusic,
       carry_context: !!opts.carryContext,
+      diarize: !!opts.diarize,
+      speakers: opts.speakers || 'auto',
     });
     if (!begun || !begun.ok) throw new Error((begun && begun.error) || 'Could not start transcription.');
     this.jobId = begun.job_id;

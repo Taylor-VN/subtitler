@@ -42,7 +42,10 @@ def _read_wav_mono16k(path):
     """The front-end always sends 16 kHz mono PCM, so this stays simple."""
     with wave.open(path, 'rb') as w:
         if w.getnchannels() != 1 or w.getsampwidth() != 2:
-            raise EngineError('Internal error: expected 16-bit mono PCM audio.')
+            raise EngineError(
+                'Internal error: expected 16-bit mono PCM audio, got '
+                f'{w.getnchannels()}-channel {w.getsampwidth() * 8}-bit at '
+                f'{w.getframerate()} Hz.')
         frames = w.readframes(w.getnframes())
         rate = w.getframerate()
     import array
@@ -82,6 +85,27 @@ class BaseEngine:
         terms = self.options.get('terms') or []
         candidates = vocab.engine_prompt_kwargs(self.model.get('engine'), terms)
         return supported_kwargs(func, candidates)
+
+    def keep_uncertain_kwargs(self, func):
+        """
+        Stand Whisper's own gate down, where the operator has asked for the
+        passages it would have discarded.
+
+        Whisper carries a no-speech probability per window, and where that is
+        high and the decode came out weak it drops the whole thirty seconds and
+        seeks past them — no words, no timings, nothing to notice afterwards
+        except a hole. Two people talking over each other reads exactly like
+        that from inside the decoder, and so does a hard cut into a new scene.
+        Standing the gate down also restores the temperature retries, which the
+        same check calls off on the grounds that the window is only silence.
+
+        What it does not do is stop silence being dropped. That is still done
+        afterwards, by the level detector, which measures the audio rather than
+        inferring it from how the decode went.
+        """
+        if not self.options.get('keep_uncertain'):
+            return {}
+        return supported_kwargs(func, {'no_speech_threshold': None})
 
     @property
     def repo(self):
@@ -126,6 +150,7 @@ class MlxWhisperEngine(BaseEngine):
             # Carrying context improves coherence but can send the decoder into
             # a repetition loop on music and room tone, so it is opt-in.
             condition_on_previous_text=bool(options.get('carry_context', False)),
+            **self.keep_uncertain_kwargs(mlx_whisper.transcribe),
             **self.bias_kwargs(mlx_whisper.transcribe),
         )
 
@@ -414,6 +439,158 @@ class TransformersEngine(BaseEngine):
         return {'segments': segments, 'words': words, 'language': lang, 'text': text}
 
 
+class GraniteSpeechEngine(BaseEngine):
+    """
+    IBM Granite Speech — an LLM-backbone model with its own audio processor
+    and a chat-template prompt, called via AutoProcessor + generate() rather
+    than pipeline('automatic-speech-recognition'). Its feature extractor's
+    __call__ doesn't accept the `sampling_rate` kwarg the generic ASR pipeline
+    passes, so TransformersEngine's path raises immediately on this model.
+    Text only — the aligner supplies word timings.
+    """
+
+    # Undocumented by IBM; borrows the 30s window TransformersEngine already
+    # uses for pipeline chunking, since bypassing the pipeline loses that.
+    CHUNK_SECONDS = 30.0
+    MAX_NEW_TOKENS = 320
+
+    @staticmethod
+    def _patch_projector_batch_bug(model):
+        """
+        GraniteSpeechEncoderProjector.forward() hands its learned query
+        (batch 1) to the QFormer alongside encoder_hidden_states split into
+        `nblocks` blocks (batch nblocks). CPU implicitly broadcasts the query
+        across blocks; on MPS (confirmed on torch 2.13 / transformers 5.15)
+        that broadcast silently collapses to batch 1 instead, so any audio
+        needing more than one ~4s block fails downstream with
+        "shape '[1, N, -1]' is invalid for input of size <one block>".
+        Explicitly expanding the query is correct on every backend, so this
+        is applied unconditionally rather than gated on device == 'mps'.
+        """
+        import math
+        import types
+        try:
+            projector = model.model.projector
+        except AttributeError:
+            return
+        if type(projector).__name__ != 'GraniteSpeechEncoderProjector':
+            return
+
+        def patched_forward(self, hidden_states):
+            import torch.nn.functional as F
+            batch_size, seq_len, dim = hidden_states.size()
+            nblocks = math.ceil(seq_len / self.window_size)
+            pad = nblocks * self.window_size - seq_len
+            hidden_states = F.pad(hidden_states, (0, 0, 0, pad), 'constant', 0)
+            hidden_states = hidden_states.view(batch_size * nblocks, self.window_size, dim)
+
+            query_embeds = self.query.expand(batch_size * nblocks, -1, -1)
+            query_output = self.qformer(
+                query_embeds=query_embeds,
+                encoder_hidden_states=hidden_states,
+                encoder_attention_mask=None,
+                return_dict=True,
+            )
+            return self.linear(
+                query_output.last_hidden_state.reshape(
+                    batch_size, nblocks * self.window_size // self.downsample_rate, -1))
+
+        projector.forward = types.MethodType(patched_forward, projector)
+
+    def _device(self):
+        requested = self.options.get('device') or 'auto'
+        try:
+            import torch
+            if requested != 'auto':
+                return requested
+            if torch.cuda.is_available():
+                return 'cuda'
+            if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():
+                return 'mps'
+        except Exception:
+            pass
+        return 'cpu'
+
+    def load(self, progress_cb=None):
+        try:
+            import torch
+            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+        except ImportError:
+            raise EngineError('The Transformers + PyTorch runtime is not installed. '
+                              'Install it from Settings → Speech Runtimes.')
+
+        device = self._device()
+        if progress_cb:
+            progress_cb(0.05, f'Loading {self.model["label"]} on {device.upper()}…')
+
+        try:
+            processor = AutoProcessor.from_pretrained(self.repo)
+            dtype = torch.bfloat16 if device == 'cuda' else torch.float32
+            # No device_map= here: that path requires the `accelerate` package
+            # for a plain single-device load, so just place the model directly.
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                self.repo, torch_dtype=dtype).to(device)
+            self._patch_projector_batch_bug(model)
+        except Exception as e:
+            raise EngineError(
+                f'Could not load {self.model["label"]}: {e}\n\n'
+                'This model needs transformers>=4.52.1. If an older version is '
+                'installed, reinstall the Transformers runtime from Settings → '
+                'Speech Runtimes.')
+
+        self.device = device
+        self.processor = processor
+        self.handle = model
+
+    def transcribe(self, wav_path, options, progress_cb=None):
+        import torch
+
+        samples, rate = _read_wav_mono16k(wav_path)
+        if not samples:
+            return {'segments': [], 'words': [], 'language': self._lang(options), 'text': ''}
+
+        tokenizer = self.processor.tokenizer
+        instruction = 'transcribe the speech with proper punctuation and capitalization.'
+        terms = options.get('terms') or []
+        if terms:
+            instruction = f'transcribe the speech to text. Keywords: {", ".join(terms)}.'
+        chat = [{'role': 'user', 'content': f'<|audio|>{instruction}'}]
+        prompt = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+
+        chunk_len = max(1, int(self.CHUNK_SECONDS * rate))
+        total = len(samples)
+        pieces = []
+
+        for start in range(0, total, chunk_len):
+            chunk = samples[start:start + chunk_len]
+            if not chunk:
+                continue
+            wav = torch.tensor(chunk.tolist(), dtype=torch.float32).div(32768.0).unsqueeze(0)
+
+            model_inputs = self.processor(prompt, wav, device=self.device,
+                                          return_tensors='pt').to(self.device)
+            with torch.no_grad():
+                out = self.handle.generate(**model_inputs, max_new_tokens=self.MAX_NEW_TOKENS,
+                                           do_sample=False, num_beams=1)
+
+            num_input_tokens = model_inputs['input_ids'].shape[-1]
+            new_tokens = out[0, num_input_tokens:].unsqueeze(0)
+            piece = tokenizer.batch_decode(new_tokens, add_special_tokens=False,
+                                           skip_special_tokens=True)[0].strip()
+            if piece:
+                pieces.append(piece)
+
+            if progress_cb:
+                progress_cb(min(0.95, 0.1 + 0.85 * min(start + chunk_len, total) / total),
+                           'Transcribing…')
+
+        text = ' '.join(pieces)
+        segments = [{'start': 0.0, 'end': total / float(rate or 16000),
+                    'text': text, 'words': []}] if text else []
+
+        return {'segments': segments, 'words': [], 'language': self._lang(options), 'text': text}
+
+
 class FasterWhisperEngine(BaseEngine):
     """
     CTranslate2 Whisper. Note this has no Metal backend — on Apple Silicon it
@@ -454,6 +631,7 @@ class FasterWhisperEngine(BaseEngine):
             vad_filter=bool(options.get('vad', True)),
             beam_size=int(options.get('beam_size', 5)),
             condition_on_previous_text=bool(options.get('carry_context', False)),
+            **self.keep_uncertain_kwargs(self.handle.transcribe),
             **self.bias_kwargs(self.handle.transcribe),
         )
 
@@ -481,6 +659,7 @@ ENGINE_CLASSES = {
     registry.ENGINE_MLX_PARAKEET: ParakeetMlxEngine,
     registry.ENGINE_MLX_QWEN3: Qwen3AsrMlxEngine,
     registry.ENGINE_TRANSFORMERS: TransformersEngine,
+    registry.ENGINE_GRANITE_SPEECH: GraniteSpeechEngine,
     registry.ENGINE_FASTER_WHISPER: FasterWhisperEngine,
 }
 
@@ -538,9 +717,17 @@ class ForcedAligner:
             if progress_cb:
                 progress_cb(0.9, 'Aligning word timings…')
 
-            waveform, sample_rate = torchaudio.load(wav_path)
-            if waveform.shape[0] > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
+            # Not torchaudio.load(): recent torchaudio releases route file I/O
+            # through the optional `torchcodec` package, which is not part of
+            # this app's runtime, and would raise ImportError here. The
+            # front-end always sends 16-bit mono PCM at 16 kHz (audio_tools.py,
+            # transcription.js), so reading it directly sidesteps that backend
+            # entirely instead of adding another dependency for a format this
+            # app already fully controls.
+            samples, sample_rate = _read_wav_mono16k(wav_path)
+            if not samples:
+                return None
+            waveform = torch.tensor(samples.tolist(), dtype=torch.float32).div(32768.0).unsqueeze(0)
             if sample_rate != bundle.sample_rate:
                 waveform = torchaudio.functional.resample(waveform, sample_rate, bundle.sample_rate)
 
@@ -556,7 +743,10 @@ class ForcedAligner:
 
             with torch.inference_mode():
                 emission, _ = model(waveform.to(device))
-                token_spans = aligner(emission[0], tokenizer(self._normalise(words)))
+                # torchaudio::forced_align has no MPS kernel (PyTorch #141287),
+                # so only this final, cheap alignment step runs on CPU — the
+                # expensive encoder forward pass above still uses the GPU.
+                token_spans = aligner(emission[0].cpu(), tokenizer(self._normalise(words)))
 
             ratio = waveform.shape[1] / emission.shape[1] / bundle.sample_rate
             out = []

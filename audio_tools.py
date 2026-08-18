@@ -29,6 +29,9 @@ import sys
 import tempfile
 import wave
 
+# What the front-end sends and what every engine here is built around.
+TARGET_RATE = 16000
+
 # Analysis window. 30 ms is long enough to be stable and short enough to catch
 # the start of a word.
 FRAME_MS = 30
@@ -38,6 +41,16 @@ FRAME_MS = 30
 NOISE_PERCENTILE = 0.20
 SPEECH_OVER_NOISE_DB = 9.0
 ABSOLUTE_FLOOR_DB = -55.0
+
+# The floor is measured again over blocks this long, because one figure for a
+# whole programme does not survive a cut. See _local_thresholds.
+BLOCK_SEC = 5.0
+
+# A block is short enough to be mostly speech, so the quietest twentieth of it —
+# rather than the quietest fifth, which over a whole programme is reliably room
+# tone — is the part still likely to *be* the room. Measured any higher and a
+# block of unbroken dialogue reports its own speech as the noise floor.
+BLOCK_NOISE_PERCENTILE = 0.05
 
 # Padding either side of detected speech, so a detector edge never clips a word.
 PAD_SEC = 0.25
@@ -108,7 +121,7 @@ def speech_regions(path, frame_ms=FRAME_MS):
         return None
 
     ordered = sorted(levels)
-    noise = ordered[min(len(ordered) - 1, int(len(ordered) * NOISE_PERCENTILE))]
+    noise = _percentile(ordered, NOISE_PERCENTILE)
     peak = ordered[-1]
     total_sec = len(levels) * frame_sec
     threshold = max(noise + SPEECH_OVER_NOISE_DB, ABSOLUTE_FLOOR_DB)
@@ -124,10 +137,12 @@ def speech_regions(path, frame_ms=FRAME_MS):
     if peak - noise < SPEECH_OVER_NOISE_DB:
         return [(0.0, total_sec)]
 
+    local = _local_thresholds(levels, frame_sec, threshold)
+
     regions = []
     start = None
     for i, level in enumerate(levels):
-        if level >= threshold:
+        if level >= local[i]:
             if start is None:
                 start = i
         elif start is not None:
@@ -137,6 +152,46 @@ def speech_regions(path, frame_ms=FRAME_MS):
         regions.append((start * frame_sec, len(levels) * frame_sec))
 
     return _tidy_regions(regions, total_sec)
+
+
+def _percentile(ordered, fraction):
+    return ordered[min(len(ordered) - 1, int(len(ordered) * fraction))]
+
+
+def _local_thresholds(levels, frame_sec, ceiling):
+    """
+    A threshold per frame, measured in blocks and never above the file-wide one.
+
+    One figure for a whole programme does not survive an abrupt cut. The noise
+    floor is the quietest fifth of the material, so in a piece that is mostly
+    loud — a music bed, a scene mixed hot — that fifth can sit *above* the level
+    of the dialogue in a quiet passage somewhere else. Every word there then
+    reads as silence and is thrown away, which is not a caption the operator can
+    see is missing; it is simply not there. Measuring the floor over blocks lets
+    each passage be judged against its own room.
+
+    Downwards only. A block that is wall-to-wall speech holds no silence to
+    measure, so its floor *is* the speech: letting that raise the threshold
+    would cut the very words it was measured from. The file-wide threshold stays
+    the ceiling, so this can admit speech that was being discarded and can never
+    discard speech that was being kept.
+    """
+    size = max(1, int(round(BLOCK_SEC / frame_sec)))
+    out = []
+
+    for start in range(0, len(levels), size):
+        block = sorted(levels[start:start + size])
+        floor = _percentile(block, BLOCK_NOISE_PERCENTILE)
+        if block[-1] - floor < SPEECH_OVER_NOISE_DB:
+            # Flat: unbroken speech, or unbroken tone, and there is nothing in
+            # the block that separates the two. Fall back to the absolute floor,
+            # which keeps quiet dialogue and still discards room tone.
+            value = ABSOLUTE_FLOOR_DB
+        else:
+            value = max(floor + SPEECH_OVER_NOISE_DB, ABSOLUTE_FLOOR_DB)
+        out.extend([min(ceiling, value)] * len(block))
+
+    return out
 
 
 def _tidy_regions(regions, total):
@@ -216,6 +271,12 @@ def isolate_vocals(wav_path, progress_cb=None, model='htdemucs'):
     has moved between releases while the CLI has stayed stable. Failure is never
     fatal: the caller falls back to the original audio, since a transcript from
     unseparated audio beats no transcript.
+
+    The stem is conformed back to 16 kHz mono before it is handed back. Demucs
+    resamples to its own 44.1 kHz stereo working rate whatever it is given, and
+    that stem then goes to the model in place of the front-end's audio — so
+    without this step it silently breaks the one thing every engine here is
+    entitled to assume about its input.
     """
     if not demucs_available():
         return None
@@ -234,22 +295,135 @@ def isolate_vocals(wav_path, progress_cb=None, model='htdemucs'):
         if proc.returncode != 0:
             return None
 
-        stem = os.path.splitext(os.path.basename(wav_path))[0]
-        for candidate in (
-            os.path.join(out_dir, model, stem, 'vocals.wav'),
-            os.path.join(out_dir, model, stem, 'vocals.mp3'),
-        ):
-            if os.path.isfile(candidate):
-                return candidate
-
-        # Layout varies by version; fall back to a search.
-        for root, _dirs, files in os.walk(out_dir):
-            for name in files:
-                if name.startswith('vocals.'):
-                    return os.path.join(root, name)
-        return None
+        stem = _find_stem(out_dir, model, wav_path)
+        return conform_to_mono16k(stem) if stem else None
     except Exception:
         return None
+
+
+def _find_stem(out_dir, model, wav_path):
+    """Locate the vocal stem Demucs just wrote."""
+    name = os.path.splitext(os.path.basename(wav_path))[0]
+    for candidate in (
+        os.path.join(out_dir, model, name, 'vocals.wav'),
+        os.path.join(out_dir, model, name, 'vocals.mp3'),
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+
+    # Layout varies by version; fall back to a search.
+    for root, _dirs, files in os.walk(out_dir):
+        for found in files:
+            if found.startswith('vocals.'):
+                return os.path.join(root, found)
+    return None
+
+
+def conform_to_mono16k(path):
+    """
+    Rewrite a WAV as the 16 kHz mono 16-bit PCM the engines expect.
+
+    @returns the new path, `path` itself when it already conforms, or None when
+    it cannot be read — a caller that has no conforming audio is better off
+    falling back to the original mix than passing a surprise format on.
+
+    The new file is written beside the old one so it is removed with the same
+    temp tree.
+    """
+    try:
+        with wave.open(path, 'rb') as w:
+            channels = w.getnchannels()
+            width = w.getsampwidth()
+            rate = w.getframerate()
+            if (channels, width, rate) == (1, 2, TARGET_RATE):
+                return path
+            if width != 2:
+                return None
+            raw = w.readframes(w.getnframes())
+    except Exception:
+        return None
+
+    try:
+        frames = _to_mono16k_frames(raw, channels, rate)
+        out_path = os.path.splitext(path)[0] + '.16k.wav'
+        with wave.open(out_path, 'wb') as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(TARGET_RATE)
+            w.writeframes(frames)
+        return out_path
+    except Exception:
+        return None
+
+
+def _to_mono16k_frames(raw, channels, rate):
+    """Downmix and resample 16-bit PCM frames, returning 16 kHz mono frames."""
+    try:
+        import numpy as np
+    except ImportError:
+        return _to_mono16k_frames_py(raw, channels, rate)
+
+    data = np.frombuffer(raw, dtype='<i2').astype(np.float32)
+    if channels > 1:
+        usable = len(data) - (len(data) % channels)
+        data = data[:usable].reshape(-1, channels).mean(axis=1)
+    if rate != TARGET_RATE:
+        data = _resample(np, data, rate)
+    return np.clip(np.rint(data), -32768, 32767).astype('<i2').tobytes()
+
+
+def _resample(np, data, rate):
+    """
+    Down to 16 kHz, band-limited where torchaudio is installed.
+
+    Anti-aliasing is the point: everything above 8 kHz folds back into the
+    speech band otherwise, and a vocal stem carries plenty of sibilance up
+    there. torchaudio is a dependency of Demucs, so its windowed-sinc resampler
+    is available on every machine that can reach this code at all; the box
+    filter below is a floor, not the expected path.
+    """
+    try:
+        import torch
+        import torchaudio
+        tensor = torch.from_numpy(np.ascontiguousarray(data)).unsqueeze(0)
+        return torchaudio.functional.resample(tensor, rate, TARGET_RATE)[0].numpy()
+    except Exception:
+        pass
+
+    ratio = rate / float(TARGET_RATE)
+    taps = max(1, int(round(ratio)))
+    if taps > 1:
+        data = np.convolve(data, np.ones(taps, dtype=np.float32) / taps, mode='same')
+    source = np.arange(len(data), dtype=np.float32)
+    wanted = np.arange(int(len(data) / ratio), dtype=np.float32) * ratio
+    return np.interp(wanted, source, data)
+
+
+def _to_mono16k_frames_py(raw, channels, rate):
+    """Standard-library fallback for _to_mono16k_frames()."""
+    data = array.array('h')
+    data.frombytes(raw)
+
+    if channels > 1:
+        data = array.array('h', [
+            int(sum(data[i:i + channels]) / channels)
+            for i in range(0, len(data) - channels + 1, channels)
+        ])
+
+    if rate != TARGET_RATE and data:
+        ratio = rate / float(TARGET_RATE)
+        taps = max(1, int(round(ratio)))
+        last = len(data) - 1
+        out = array.array('h', bytes(2 * int(len(data) / ratio)))
+        for i in range(len(out)):
+            base = int(i * ratio)
+            total = 0
+            for t in range(taps):
+                total += data[min(base + t, last)]
+            out[i] = int(total / taps)
+        data = out
+
+    return data.tobytes()
 
 
 def cleanup_dir_of(path):

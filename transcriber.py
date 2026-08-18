@@ -32,6 +32,7 @@ import uuid
 
 import audio_tools
 import bootstrap
+import diarize
 import model_registry as registry
 import engines as engines_mod
 import vocabulary as vocab
@@ -47,7 +48,8 @@ class TranscriptionJob:
     def __init__(self, job_id, options):
         self.id = job_id
         self.options = options or {}
-        # receiving -> separating -> loading -> transcribing -> aligning -> done
+        # receiving -> separating -> loading -> transcribing -> aligning
+        #   -> diarizing -> done
         self.state = 'receiving'
         self.progress = 0.0
         self.message = 'Waiting for audio…'
@@ -153,6 +155,7 @@ class Transcriber:
             'aligner': dict(registry.ALIGNER_MODEL,
                             installed=aligner_installed,
                             available=engines_mod.ForcedAligner().available()),
+            'diarizer': diarize.describe(),
             'recommended': registry.recommended('accuracy'),
             'free_disk': registry.free_disk_bytes(),
             'cache_dir': registry.hf_cache_dir(),
@@ -165,7 +168,8 @@ class Transcriber:
     def list_models(self):
         return {'ok': True, 'models': registry.list_models(),
                 'aligner': dict(registry.ALIGNER_MODEL,
-                                installed=registry.is_installed(registry.ALIGNER_MODEL['repo']))}
+                                installed=registry.is_installed(registry.ALIGNER_MODEL['repo'])),
+                'diarizer': diarize.describe()}
 
     # ------------------------------------------------------------------
     # Model install / removal
@@ -173,8 +177,9 @@ class Transcriber:
     def install_model(self, model_id):
         """Download a model in the background; poll with install_status()."""
         try:
-            if model_id == registry.ALIGNER_MODEL['id']:
-                repo, label = registry.ALIGNER_MODEL['repo'], registry.ALIGNER_MODEL['label']
+            extra = registry.EXTRA_MODELS.get(model_id)
+            if extra:
+                repo, label = extra['repo'], extra['label']
             else:
                 model = registry.get(model_id)
                 if not model:
@@ -252,8 +257,9 @@ class Transcriber:
 
     def remove_model(self, model_id):
         try:
-            if model_id == registry.ALIGNER_MODEL['id']:
-                repo = registry.ALIGNER_MODEL['repo']
+            extra = registry.EXTRA_MODELS.get(model_id)
+            if extra:
+                repo = extra['repo']
             else:
                 model = registry.get(model_id)
                 if not model:
@@ -455,6 +461,39 @@ class Transcriber:
     # ------------------------------------------------------------------
     # Worker
     # ------------------------------------------------------------------
+    def _diarize(self, job, words, opts, report):
+        """
+        Label each word with its speaker, in place.
+
+        Returns the speaker turns, or [] when separation could not run — which
+        is never fatal: unlabelled captions still beat no captions, so the job
+        carries on with a note explaining what is missing.
+        """
+        if not diarize.available():
+            job.notes.append(
+                'Speaker separation was requested but the SpeechBrain runtime is not '
+                'installed, so every caption is unlabelled. Install it from '
+                'Settings → Speech Runtimes.')
+            return []
+        if not diarize.model_installed():
+            job.notes.append(
+                'Speaker separation was requested but the speaker model has not been '
+                'downloaded, so every caption is unlabelled. Install it from Settings.')
+            return []
+
+        result = diarize.diarize_words(job.audio_path, words,
+                                       speakers=opts.get('speakers', 'auto'),
+                                       progress_cb=report)
+        if not result:
+            job.notes.append('Speaker separation could not run on this audio, so every '
+                             'caption is unlabelled.')
+            return []
+
+        turns = result.get('turns') or []
+        count = result.get('count') or 0
+        job.notes.append(f'Separated {count} speaker(s) across {len(turns)} turn(s).')
+        return turns
+
     def _run_job(self, job):
         try:
             opts = job.options
@@ -502,6 +541,9 @@ class Transcriber:
                 if separated:
                     model_audio = separated
                     job.notes.append('Dialogue isolated with Demucs.')
+                elif audio_tools.demucs_available():
+                    job.notes.append(
+                        'Music suppression failed, so the original mix was used.')
                 else:
                     job.notes.append(
                         'Music suppression unavailable, so the original mix was used. '
@@ -575,8 +617,25 @@ class Transcriber:
             if words:
                 text = ' '.join(w['word'] for w in words).strip()
 
+            # Who said each word. Measured on the original audio for the same
+            # reason VAD is: separation and level matching change the voice the
+            # embeddings describe.
+            turns = []
+            if opts.get('diarize') and words:
+                job.state = 'diarizing'
+                job.message = 'Separating speakers…'
+                turns = self._diarize(job, words, opts, report)
+                # diarize swallows every exception, cancellation included, so the
+                # flag is re-read here rather than trusted to have propagated.
+                if job.cancelled:
+                    raise _Cancelled()
+
             segments = raw.get('segments') or []
-            if words and (dropped or corrections or not any(s.get('words') for s in segments)):
+            if turns:
+                # One segment per turn, so the caption segmenter downstream can
+                # never draw a caption across two people.
+                segments = _segments_from_words(words)
+            elif words and (dropped or corrections or not any(s.get('words') for s in segments)):
                 segments = [{'start': words[0]['start'], 'end': words[-1]['end'],
                              'text': text, 'words': words}]
 
@@ -598,6 +657,8 @@ class Transcriber:
                 'speech_seconds': round(audio_tools.speech_seconds(regions), 2) if regions else None,
                 'corrections': corrections,
                 'confidence': confidence,
+                'speakers': turns,
+                'speaker_count': len(set(t['speaker'] for t in turns)) if turns else 0,
                 'notes': job.notes,
             }
         except _Cancelled:
@@ -608,6 +669,29 @@ class Transcriber:
             job.error = f'{e}'
             job.message = str(e)
             job.trace = traceback.format_exc(limit=3)
+
+
+def _segments_from_words(words):
+    """
+    One segment per unbroken run of words by the same person.
+
+    The front-end flattens segments back into a word list, so the split matters
+    less than the label riding on each word — but a segment that spans two
+    voices would be a lie in the transcript view and in anything exported from
+    the raw result, so the boundary is drawn here as well.
+    """
+    segments = []
+    for w in words:
+        speaker = w.get('speaker') or ''
+        if segments and segments[-1].get('speaker') == speaker:
+            segments[-1]['words'].append(w)
+            segments[-1]['end'] = w['end']
+        else:
+            segments.append({'start': w['start'], 'end': w['end'],
+                             'speaker': speaker, 'words': [w]})
+    for seg in segments:
+        seg['text'] = ' '.join(w['word'] for w in seg['words']).strip()
+    return segments
 
 
 def _confidence_summary(words):
